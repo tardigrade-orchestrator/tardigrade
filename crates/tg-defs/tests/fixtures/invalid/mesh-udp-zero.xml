@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The same facet as with `@port`, the same reason (ADR-0142): port 0 means "pick
+  one yourself" in the kernel, and as a setting in a definition that is no
+  setting.
+
+  The counter-check to `valid/mesh-udp.xml` — there `@udp` is valid, here **one**
+  thing differs.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <mesh port="8443" udp="0"/>
+  </workload>
+</workloads>

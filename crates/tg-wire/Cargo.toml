@@ -1,0 +1,28 @@
+[package]
+name = "tg-wire"
+description = "The JSON payload of the internal gRPC paths (one codec, not three)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "tg_wire"
+path = "src/lib.rs"
+
+[dependencies]
+# Only what a codec needs: `tonic`'s trait layer, its buffer types and `serde`. No
+# `tg-*` crate -- this one lies **beneath** all three that use it and must know
+# nothing of any of them.
+tonic = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }

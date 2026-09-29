@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- xs:enumeration on VolumeMode: there is only readWrite and readOnly. -->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="ledger" kind="service">
+    <image reference="registry.example.com/ledger:2.1"/>
+    <volumes>
+      <volume name="data" path="/var/lib/ledger" mode="readWriteMany" size="8388608"/>
+    </volumes>
+  </workload>
+</workloads>

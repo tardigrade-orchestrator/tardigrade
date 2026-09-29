@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api">
+    <image reference="registry.example.com/api:1"/>
+  </workload>
+</workloads>

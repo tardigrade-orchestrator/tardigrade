@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:enumeration on WorkloadClass: there is "single-writer" and "replicated"
+  (ADR-0010), and the choice decides about the active-role lease. A third value
+  would be a semantics nobody built.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service" class="multi-writer">
+    <image reference="example.com/api:1"/>
+  </workload>
+</workloads>

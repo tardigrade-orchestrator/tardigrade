@@ -1,0 +1,1426 @@
+# Alert rules for Prometheus — a starting point, not a decision.
+#
+# ## What this file is and what it is not
+#
+# The plan has carried the alerting rule set as open since phase 11b: the
+# metrics are queryable and not reported. This file closes the **form** —
+# which metric in which direction points at which incident —, and does so out
+# of what the ADRs have fixed anyway. The **thresholds** belong to operations:
+# they stand here at start values, each with its rationale, and are meant to be
+# adjusted.
+#
+# ## Where the numbers come from
+#
+# The `for:` durations are computed from this system's cadences and not
+# chosen:
+#
+#   Lease                15 s   (ADR-0014)
+#   Lease cadence         3 s   (lease/5, ADR-0076)
+#   Report cadence        5 s   (lease/3, ADR-0068)
+#   Report window        15 s   (ADR-0068)
+#   Sidecar re-read      60 s
+#   Staleness window     15 min (ADR-0014)
+#   SVID                 15 min (ADR-0014)
+#   Agent intermediate   12 h, renewed every 3 h (ADR-0014, ADR-0037)
+#
+# A `for:` duration below the corresponding cadence produces false alarms at
+# every ordinary round; twice it is the smallest duration that survives a
+# single dropout.
+#
+# ## Two severities
+#
+#   critical  workloads are losing something now — identity, reachability,
+#             the active role.
+#   warning   it will bite, but not yet.
+#
+# ## Leader-owned metrics and the gauge expiry
+#
+# `tg_node_*`, `tg_cluster_*` and `tg_scheduler_domain_*` are set **only by the
+# leader** -- and one that has stepped down keeps its series for up to
+# **15 minutes** (ADR-0088), frozen. From that follows a rule for every rule on
+# them:
+#
+#   Combine with `and on(instance) (tg_raft_leader == 1)` if the rule
+#   **aggregates** over instances or its `for:` duration is **at most** the
+#   expiry window.
+#
+# Measured, that concerned four rules, and the sharpest was
+# `TardigradeNodeSilent`: on the frozen series `time() - ... > 60` becomes true
+# after a minute, for a node that reports flawlessly to the **new** leader -- a
+# false alarm after **every** leader change, and that is normal operation
+# (ADR-0031).
+#
+# The remaining ones are **measured** to be harmless and therefore carry no
+# combination: `TardigradeAddressSpaceRunningOut` computes per instance with
+# numbers that are the same on both leaders (the address plan does not change);
+# `ProxyImages`, `DnsZones`, `UsernsSkew` and `NodeStaysDetached` wait 30
+# minutes or an hour, i.e. beyond the expiry window.
+#
+# ## Two traps in the form of the expressions
+#
+# **1. Summary, not a histogram.** `tg_raft_rpc_seconds` is a **summary** with `quantile` labels, not a
+# histogram with buckets: `metrics-exporter-prometheus` renders it that way, and
+# without `le` there is nothing for `histogram_quantile` to compute on. Measured —
+# and the manual carried the wrong form.
+#
+# **0. The global label is not called `node` everywhere.** `tgd` and `tg-agent`
+# report `node` (the **name** from ADR-0043), `tg-proxy` reports `workload` —
+# it runs in the container and cannot know the node (ADR-0059). A rule over
+# `tg_proxy_*` therefore says `{{ $labels.workload }}`; here once stood
+# `{{ $labels.node }}`, and the value in it was the workload. The assignment
+# stands in `tg_telemetry::init::Reporter`.
+#
+# **2. Vector pairing.** A comparison between two metrics pairs them over
+# **all** labels if nothing else stands there. If both sides carry the same
+# labels (`tg_process_open_fds / tg_process_max_fds`), it fits by itself; if
+# they do not, `on (…)` is needed. The labels per metric stand in the code at
+# the place at which they are set — not here, otherwise it would be a second
+# list.
+
+groups:
+  - name: tardigrade-identity
+    rules:
+      # ADR-0014: if the agent mints from an expired intermediate, **no** SVID
+      # of this node is accepted any more — all workloads at the same time.
+      # Renewal is every 3 h at a 12 h lifetime; if less than 4 h remain, at
+      # least two renewals have failed.
+      - alert: TardigradeIntermediateExpiring
+        expr: tg_identity_intermediate_expires_at_timestamp_seconds - time() < 4 * 3600
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Agent intermediate on {{ $labels.node }} is expiring"
+          description: >-
+            If it expires, all workloads of this node lose their identity at the
+            same time (ADR-0014). The renewal over the credential path
+            (ADR-0037) has evidently not got through for hours.
+
+      # An SVID carries 15 min and comes as a push over the open stream
+      # (ADR-0035). If less than 5 min remain, the stream has broken off.
+      - alert: TardigradeSidecarSvidExpiring
+        expr: tg_proxy_svid_expires_at_timestamp_seconds - time() < 300
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.workload }}: the sidecar's SVID is expiring"
+          description: >-
+            After that every mTLS handshake of this sidecar fails (ADR-0007).
+
+      # A foreign name at the credential port: since ADR-0037/0078 it gets a
+      # nonce and leaves nothing behind. That somebody tries is nevertheless an
+      # event.
+      - alert: TardigradeUnknownNodesRequestNonces
+        expr: rate(tg_identity_challenges_total{outcome="unknown"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unknown node names are asking for nonces"
+          description: >-
+            Either a node is joining that nobody has admitted (ADR-0037), or
+            somebody is probing the port.
+
+  - name: tardigrade-data-plane
+    rules:
+      # Fail-static means: stale still applies (ADR-0019). The sidecar re-reads
+      # every 60 s; the staleness window is 15 min (ADR-0014). Between the two
+      # lies the time in which a revocation has not arrived.
+      - alert: TardigradeEdgeStateStale
+        expr: time() - tg_proxy_policy_refreshed_at_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.workload }}: the sidecar has not taken over its may_talk edges for minutes"
+          description: >-
+            It carries on enforcing what it last knew (ADR-0019/0025) — so an
+            edge withdrawal does not take effect with it. Is the agent not
+            reaching the cluster, or is it not writing the file?
+
+      # The same for the way out, and there it weighs more: an old state keeps a
+      # **withdrawn** permission alive (ADR-0041).
+      - alert: TardigradeEgressStateStale
+        expr: time() - tg_proxy_egress_refreshed_at_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.workload }}: the sidecar has not taken over its egress permissions for minutes"
+          description: >-
+            A withdrawn permission to the outside still applies with it
+            (ADR-0041).
+
+      # A single writer without an active role stands still (ADR-0064), and in
+      # the state that is indistinguishable from any other standstill. A
+      # failover takes seconds; a minute is no failover any more.
+      - alert: TardigradeSingleWriterWithoutActiveRole
+        expr: tg_workload_active_role == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.workload }} does not hold its active role"
+          description: >-
+            It is not running (or is fenced). Either its node is not reaching
+            the leader, or the clocks diverge
+            (tg_lease_clock_skew_seconds, ADR-0078).
+
+      # ADR-0078: the security statement holds only as long as the skew is
+      # smaller than the safety margin (3 s). A third of that is the threshold —
+      # the metric underestimates.
+      # The sidecar's fourth file, and the only one without a metric until
+      # ADR-0082: `tg_workload_active_role` is set by the **agent** from the
+      # lease (ADR-0064), not by the sidecar from the file. If its refresher
+      # dies, the agent keeps reporting `1` while the sidecar refuses.
+      #
+      # The `> 0` on the left is half the rule: `0` means "no role", and for a
+      # warm standby that is the **normal state** (only instance 0 gets the
+      # lease, ADR-0064 D8). Without it the rule fired permanently for every
+      # standby. What is hit is whoever **had** a role whose deadline has
+      # passed -- i.e. exactly the contradiction.
+      - alert: TardigradeSidecarRoleExpired
+        expr: >-
+          tg_proxy_active_role_expires_at_timestamp_seconds > 0
+          and
+          time() - tg_proxy_active_role_expires_at_timestamp_seconds > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.workload }}: the sidecar no longer serves its active role"
+          description: >-
+            The sidecar refuses in both directions (ADR-0066). Either its
+            refresher has died (then `tg_task_alive` says nothing, it has no
+            observer -- ADR-0082) or the agent no longer writes the file.
+            Counter-check: `tg_workload_active_role` on the node.
+
+      - alert: TardigradeClocksDiverge
+        expr: tg_lease_clock_skew_seconds > 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A node's clock lies behind the leader's"
+          description: >-
+            From 3 s on, a node holds the active role while the leader passes it
+            on — two writers (ADR-0078). The number is a lower bound. Check
+            time synchronization (ADR-0024).
+
+      # If `dropped` rises, unreadable packets are arriving; if `refused` rises
+      # sharply, containers are asking for names for which there is no egress
+      # permission (ADR-0041). The **change** is the signal, not the level.
+      - alert: TardigradeResolverDropsPackets
+        expr: rate(tg_dns_answers_total{outcome="dropped"}[5m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The node-local resolver is dropping packets"
+          description: >-
+            Unreadable queries, or answers it does not answer (ADR-0013).
+
+  - name: tardigrade-cluster
+    rules:
+      # ADR-0033: `openraft` uses `heartbeat_interval` at the same time as the
+      # time bound of the replication call. A path that is slower replicates
+      # **never** — and quietly, because the others hold the quorum. The
+      # ordering condition there demands a factor of 3.
+      #
+      # **Summary, not a histogram**: the exporter renders `quantile` labels
+      # and no buckets (measured). `histogram_quantile` would be an expression
+      # here that never fires.
+      - alert: TardigradeReplicationTooSlow
+        # **`on (node)` is not ornament.** On the left stand `peer`, `rpc` and
+        # `quantile`, on the right none of them — and PromQL pairs two vectors
+        # over **all** labels. Without the setting the comparison finds no pair
+        # and the rule never fires.
+        expr: >-
+          tg_raft_rpc_seconds{quantile="0.99"}
+            > on (node) group_left () (tg_raft_rpc_deadline_seconds / 3)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replication to {{ $labels.peer }} is approaching its time bound"
+          description: >-
+            If it exceeds it, this path no longer replicates, and does so
+            without an error message (ADR-0033).
+
+      - alert: TardigradeReplicationFailing
+        expr: rate(tg_raft_rpc_failures_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Calls to {{ $labels.peer }} are failing"
+          description: >-
+            If the counter rises while nothing arrives in the quantile, the path
+            is not slow but closed.
+
+      # Report cadence 5 s, window 15 s (ADR-0068). A minute of silence is no
+      # dropout any more. ADR-0057: detaching is nevertheless done by a human.
+      - alert: TardigradeNodeSilent
+        # **Only the current leader counts.** Only it sets this metric, and one
+        # that has stepped down keeps its series for up to 15 minutes
+        # (ADR-0088) -- frozen, while `time()` runs on. Without the combination
+        # this was a false alarm after **every** leader change, and that is
+        # normal operation (ADR-0031).
+        expr: >-
+          (time() - tg_node_last_report_timestamp_seconds > 60)
+          and on(instance) (tg_raft_leader == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.node }} no longer reports"
+          description: >-
+            Its active-role leases are not renewed (ADR-0064), and its
+            containers carry on (ADR-0019). No auto-detach — that is decided by
+            a human (ADR-0057).
+
+      # Temporarily positive is normal (until the next report); permanently it
+      # means: it gets slices and does not apply them.
+      - alert: TardigradeNodeNotApplyingSlices
+        # Only the current leader counts -- see TardigradeNodeSilent.
+        expr: >-
+          tg_node_slice_lag > 0
+          and on(instance) (tg_raft_leader == 1)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.node }} lags behind the log"
+          description: >-
+            Its report keeps coming, so it looks healthy — this number is the
+            only one at which it stands out (ADR-0040). Look with
+            `tgctl cluster nodes`.
+
+      # Since ADR-0082 a panic costs its task and not the node.
+      # The price: a process that carries on and no longer does something --
+      # a resolver that does not answer looks from outside like one that
+      # answers. Nobody restarts the task, so this is critical and not merely
+      # noteworthy. `for` is short: the zero is set by the observer when the
+      # task is already dead -- there is nothing to wait for, and one scrape
+      # interval of tolerance suffices against half a scrape.
+      #
+      # **The zero is repeated in the scrape** (ADR-0088). Without that it
+      # would expire after 15 minutes, and this rule would resolve **itself** --
+      # for a task that is still dead and that nobody restarts.
+      # No contradiction with the expiry: that applies to time series about
+      # something that no longer exists; this task exists, it merely does not
+      # run, and the statement dies with the process in which it applies.
+      # **The restart loop** -- the most frequent operational disturbance of an
+      # orchestrator, and until ADR-0015 was redeemed it had no number.
+      # Counted is only what was **not running**: a running container is
+      # replaced solely by a decree (ADR-0071), and that is a human's decision.
+      # A single restart is normal (a node coming up); what counts is the
+      # **rate**.
+      #
+      # The threshold is computed from the pass: a workload that is restarted in
+      # every pass reaches 0.1/s at the default (10 s). Half of that also hits
+      # one that fails in every second pass, and leaves a single restart alone.
+      - alert: TardigradeWorkloadNotComingUp
+        expr: rate(tg_workload_restarts_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.workload }} is being restarted continuously"
+          description: >-
+            The container exits and is started again in every pass. The reason
+            stands in the workload's log, not in the node's -- the reconcile did
+            not fail (`tg_workload_failures_total` stays quiet), the container
+            merely does not keep running. Frequently: a missing dependency that
+            does not answer yet (ADR-0089 deliberately lets a dependant start
+            up), a missing volume, a wrong command line.
+
+      - alert: TardigradeTaskDied
+        expr: tg_task_alive == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.node }}: the task {{ $labels.task }} no longer runs"
+          description: >-
+            The process lives and no longer does something (ADR-0082). Since
+            ADR-0116 the observer restarts a **panicked** task (backoff up to a
+            minute) — if this metric nevertheless stands at zero for a minute,
+            either the backoff has not yet elapsed or the task has **returned**,
+            and that is not restarted. The reason stands in this node's log.
+            Also look at tg_task_restarts_total: if it grows, it panics again
+            and again; if it does not grow, only a restart of the process helps.
+
+      - alert: TardigradeTaskFlapping
+        # **The rate, not the level** (ADR-0116): since the restart
+        # tg_task_alive goes 1 -> 0 -> 1, and a brief death rightly no longer
+        # alarms. What counts is a task that dies again and again — it fails to
+        # do a piece in every window, and the consequences occur proportionally
+        # (SVID rotation ADR-0014, slice ADR-0040, resolution ADR-0013).
+        #
+        # The **threshold** belongs to operations (ADR-0047): here stand the
+        # direction and the duration. A single restart is a transient panic and
+        # heals; the backoff caps at a minute, so more than one restart per 15
+        # minutes over a quarter of an hour is no slip any more.
+        expr: increase(tg_task_restarts_total[15m]) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.node }}: the task {{ $labels.task }} does not come up"
+          description: >-
+            It panics repeatedly and is restarted each time (ADR-0116). The
+            reason stands in this node's log ("task panicked, it is being
+            restarted"). A restart is no repair: what the task does fails in
+            every window.
+
+      - alert: TardigradeBrokenDeclaration
+        # Only the current leader counts -- see "Leader-owned metrics" in the
+        # header.
+        expr: >-
+          tg_node_isolated_entries > 0
+          and on(instance) (tg_raft_leader == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.node }} cannot classify entries"
+          description: >-
+            They carry on running but are not reconciled, and as long as
+            something is isolated this node clears nothing away (ADR-0062).
+
+      # An outage frees no ordinal (ADR-0039); if the address space is full,
+      # **no node is admitted any more** (ADR-0069).
+      - alert: TardigradeAddressSpaceRunningOut
+        expr: tg_cluster_ordinals_used / tg_cluster_ordinals_capacity > 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The node subnets are running out"
+          description: >-
+            Remove permanently failed nodes with `tgctl node remove`, or widen
+            the cluster network (ADR-0069).
+
+      # ADR-0047: `absorbs` is a bit and only flips when it is too late. The
+      # early warning is the ratio.
+      - alert: TardigradeReserveRunningOut
+        # **The combination stands *inside* the sum**, and here it is
+        # necessary, because it aggregates: a sum over the old and the new
+        # leader **mixes** their numbers, and in which direction is not
+        # arguable. See "Leader-owned metrics" in the header.
+        expr: >-
+          sum by (domain, resource) (
+            tg_scheduler_domain_elsewhere and on(instance) (tg_raft_leader == 1)
+          ) / sum by (domain, resource) (
+            tg_scheduler_domain_at_risk and on(instance) (tg_raft_leader == 1)
+          ) < 1.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The outage of {{ $labels.domain }} would be tight to absorb"
+          description: >-
+            It is computed in sums, and on an outage the spread target shrinks
+            along with it — the number overestimates (ADR-0047).
+
+      - alert: TardigradeDomainNotAbsorbable
+        # Only the current leader counts -- see TardigradeNodeSilent.
+        expr: >-
+          tg_scheduler_domain_absorbs == 0
+          and on(instance) (tg_raft_leader == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The outage of {{ $labels.domain }} would not be absorbable"
+          description: >-
+            Raise the reserve per node or add capacity (ADR-0047).
+
+      # A reconcile that fails repeatedly is the normal case with a broken image
+      # and the exception with everything else. The **class** says where to
+      # look; the text is held by the node's log.
+      - alert: TardigradeReconcileFailsRepeatedly
+        expr: rate(tg_workload_failures_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.workload }} fails repeatedly ({{ $labels.class }})"
+          description: >-
+            The reconciler keeps trying (ADR-0010). The text is named by the
+            node's log; the class says where to look.
+
+      # **A state the node cannot read** (ADR-0122). The decision is to then do
+      # **nothing**: not start, not stop, not clear away -- the safe direction,
+      # because the opposite error was measured to unmount the rootfs under a
+      # running container and delete its ephemeral volume.
+      #
+      # Precisely for that reason the rule is needed: without it the safe
+      # direction would be a **silence**. Nothing happens, nothing fails
+      # (`tg_workload_failures_total` stays quiet, and that is deliberate -- a
+      # `failed` would pull the dependants down, ADR-0061), and the instance
+      # disappears from the resolution without anyone saying why.
+      #
+      # A single wobble is no incident; ten minutes are one.
+      - alert: TardigradeStateUnknown
+        expr: rate(tg_workload_unclear_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.workload }}: the node cannot read the state"
+          description: >-
+            The runtime answered and the node did not understand it, or it did
+            not answer at all (ADR-0122). The container is **not** touched and
+            **not** resolved; it may be running and serving. The reason stands
+            in the node's log ("state unknown"). Frequently: the runtime binary
+            no longer answers, or it reports a state this version does not know
+            (ADR-0003 permits the switch between youki and crun). Until then
+            this workload does not restart, even if it is dead -- that is the
+            deliberate choice.
+
+  - name: tardigrade-operations
+    rules:
+      # ADR-0144: **the first rule of this tree without a threshold.** It
+      # compares two time series with each other and carries no number anybody
+      # would have to choose -- the limit comes from the container's cgroup,
+      # i.e. from what the kernel enforces (not from the declaration,
+      # ADR-0063/0070).
+      #
+      # If the peak touches the ceiling, the next allocation above it is the
+      # OOM killer. Out of exactly this number an operator sets the memory limit
+      # from ADR-0086.
+      #
+      # `for: 5m`, because `memory.peak` does **not** go back down by itself
+      # (ADR-0123): without the duration the rule would fire for a one-off
+      # excursion until the container's next restart.
+      - alert: TardigradeContainerAtMemoryCeiling
+        expr: tg_container_memory_peak_bytes >= tg_container_memory_limit_bytes
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ $labels.workload }}/{{ $labels.replica }} has touched its memory
+            limit
+          description: >-
+            This container's peak has reached the limit its cgroup enforces. The
+            next allocation above it ends it (OOM). Either raise the limit in
+            `<resources>` -- it takes effect at the **next start** (ADR-0063) --
+            or look at what the workload is holding.
+
+            For a **sidecar** the limit comes from the surcharge
+            (ADR-0067/0086) and not from a declaration; there
+            `SetSidecarOverhead` is the lever.
+      # A rolling update is legitimate and takes time; half an hour of skew is
+      # no longer one (ADR-0059).
+      - alert: TardigradeProxyImagesDiverge
+        expr: tg_cluster_proxy_images > 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Two nodes run different sidecar versions"
+          description: >-
+            `--proxy-image` is a setting per node (ADR-0059). Which one
+            deviates: `tgctl cluster nodes`.
+
+      # Which version of the session protocol a process speaks (ADR-0072).
+      #
+      # **The only piece of information that survives a format skew.** A format
+      # change is no rolling update: the strict types refuse an unknown field,
+      # so two versions do not talk to each other -- every slice and every
+      # report fails. Everything that ran over the **session** is exactly what
+      # the skew breaks; this number stands at the Prometheus endpoint of every
+      # process and gets through.
+      #
+      # **`count_values` and not `count by`**: the version is the **value** of
+      # this gauge and not a label. `count by (fields)` would group everything
+      # into one bucket, the number would always be one, and the rule would fire
+      # **never** -- the same silent error as once with
+      # `tg_identity_signer_epoch`.
+      #
+      # 30 minutes, as with the proxy image above and for the same reason: the
+      # maintenance window looks exactly the same. What is meant to stand out is
+      # one that does not end -- a forgotten node is indistinguishable within
+      # the window from a waiting one, because both are quiet.
+      - alert: TardigradeProtocolVersionsDiverge
+        expr: count(count_values("fields", tg_process_protocol_fields)) > 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Two processes speak different protocol versions"
+          description: >-
+            A format change of the session messages is not rolling (ADR-0072,
+            determination 3): while two versions run, no node of the old one
+            gets a slice any more, and every single writer fences itself. Who is
+            still lagging is said by the gauge's value -- `up`/`instance` names
+            the process. The order stands in the manual: first all `tgd`, then
+            all `tg-agent`.
+
+      # **The skew is latent and strikes at the leader change**: all agents get
+      # the leader's key (ADR-0077), a follower with a wrong one looks uniform
+      # until then. Therefore `critical` and a short deadline -- what one has
+      # sealed, nobody opens afterwards.
+      #
+      # It is counted over the **instances**, because `tgd` nodes report nothing
+      # to each other (ADR-0095).
+      - alert: TardigradeDataKeysDiverge
+        expr: count(count by (fingerprint) (tg_identity_data_key_info)) > 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Two tgd instances run different data keys"
+          description: >-
+            The data key is cluster-wide **one** (ADR-0095). What one node has
+            sealed, another with a deviating key does not open -- and the error
+            shows only at the leader change. Which node deviates: the
+            fingerprint stands on the label, and `up`/`instance` names the
+            process.
+
+      # The signer of the signing CA (ADR-0097).
+      #
+      # **The skew and not the value**, for the same reason as with the data key
+      # above: `kind="local"` is in a cluster that never set up the group the
+      # **normal case** -- a rule on it would fire permanently and would get
+      # switched off. What is meant to stand out is a node that has **fallen
+      # back** while others run the group: there the full CA key lies as a file,
+      # and a stolen node gives the ability to issue every SVID of the cluster.
+      #
+      # 15 minutes, because a rolling changeover looks exactly the same.
+      - alert: TardigradeSignersDiverge
+        expr: count(count by (kind) (tg_identity_signer)) > 1
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Not all tgd instances run the same signer"
+          description: >-
+            At least one node has fallen back to the CA key in memory while
+            others run the FROST group (ADR-0014, ADR-0097). There the full key
+            lies as a file -- `signing/ca.key.pem` -- and a stolen node issues
+            with it every SVID of this cluster. Which one: the label `kind`
+            stands at the process, and `up`/`instance` names it. The cause is
+            almost always missing or unusable group material; the node's log
+            names the reason.
+
+      # Whether the group *can* sign (ADR-0097, determination 7).
+      #
+      # **Only for nodes that run it** -- `and on (instance)`: without this
+      # binding the rule would fire in every cluster without a group, where the
+      # number is zero.
+      #
+      # The threshold is three of five (ADR-0014). A seat without a leaf gets no
+      # share (ADR-0097, determination 2), so a node with two admissions cannot
+      # sign -- and that otherwise stands out at the first minting, not at the
+      # start.
+      - alert: TardigradeSignerGroupBelowThreshold
+        expr: >-
+          (tg_identity_signer_seats < 3)
+          and on (instance) (tg_identity_signer{kind="group"} == 1)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Fewer signer seats admitted than the threshold demands"
+          description: >-
+            This node runs the FROST group but has fewer than three leaves under
+            `<data-dir>/signers/` (ADR-0014: t = 3 of 5). A group signature
+            needs three shares, and a seat without a leaf gets none -- the next
+            minting fails. Distribute the missing leaves (operations manual,
+            section signing group). **Two leaves of the same node** also land
+            here: both are refused, and the number afterwards says the truth --
+            previously it counted both and this rule stayed mute.
+
+      # **The third loss costs the CA** (ADR-0140, determination 8). Five seats
+      # with t = 3 carry two unsealed or lost shares; at the third only the
+      # ceremony with the air-gapped root helps (ADR-0014). The threshold
+      # therefore stands at **t + 1** and not at t: at t the CA is still there,
+      # but the next failure takes it along, and an alarm that only fires then
+      # reports a state from which there is no calm way back.
+      #
+      # An update does **not** trigger it: without a PCR policy, firmware,
+      # bootloader and `dbx` are without consequence (ADR-0140, determination
+      # 4). Triggers are a TPM clear, a mainboard swap or a VM restore without
+      # the vTPM state -- and each of those is an RTS case (ADR-0108).
+      #
+      # The deadline is short, because the state is not one that resolves
+      # itself: a share is sealed at **startup**, so after five minutes it
+      # either is or never will be.
+      - alert: TardigradeSignerSharesNotSealed
+        expr: count(tg_identity_signer_share_sealed == 1) < 4
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Too few signer shares lie sealed"
+          description: >-
+            Fewer than four of the five seats have their share in the TPM
+            (ADR-0140). At three the threshold t = 3 is only just covered, at
+            the next loss the CA is gone and only retrievable over a ceremony
+            with the air-gapped root (ADR-0014). Affected nodes are named by
+            `tg_identity_signer_share_sealed == 0`. If the TPM is missing there,
+            it stands in the startup log; if it is there and the share is open
+            nevertheless, the seat never started up at all. A lost share is
+            retrieved by `tgctl signer repair` (ADR-0108), not by a restart.
+
+      # **Somewhere stands a port number that belongs to no `<mesh port>`**
+      # (ADR-0141). A mesh member offers exactly one port; whoever dials another
+      # is refused instead of redirected.
+      #
+      # Until ADR-0141 such a connection **arrived** -- at the right workload,
+      # on the right port, only not on the one the caller had meant. The error
+      # was invisible until somebody expected a second service behind the second
+      # port number.
+      #
+      # A quarter of an hour, because a single attempt means nothing (a port
+      # scan, a test) and a sustained rate means a configuration.
+      - alert: TardigradeWrongMeshPort
+        expr: rate(tg_proxy_wrong_port_total[5m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A caller dials a port this workload does not offer"
+          description: >-
+            Connections to {{ $labels.workload }} name a port other than its
+            `<mesh port>` and are refused (ADR-0141). Which one was intended
+            stands in the sidecar's log. Remedy: bring the port number at the
+            **caller** to the one from `<mesh port>` -- or, if it is right
+            there, correct `<mesh port>` and decree the workload anew
+            (`tgctl cluster restart`).
+
+      # **Only the discarding makes a refresh effective** (ADR-0107,
+      # determination 6). As long as one seat holds the old version, t seats can
+      # carry on signing in it -- the share for whose sake the refresh was run
+      # then still applies. Two versions are normal during a refresh; the rounds
+      # take seconds, so an hour is ample.
+      - alert: TardigradeSignerGenerationsPending
+        expr: tg_identity_signer_epochs > 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "A signer seat still holds an old version"
+          description: >-
+            The discarding after a refresh has not happened (ADR-0107) -- mostly
+            because one seat did not get the new version onto disk and the
+            coordinator therefore discarded none. Until then the old share still
+            applies. The node's log names the seat; afterwards
+            `tgctl cluster signer-refresh` again.
+
+      # A seat that lags signs in a version in which the others no longer sign
+      # -- measured by the number of **different** highest versions in the
+      # cluster.
+      #
+      # **`count_values` and not `count by`**, and that is a finding on my own
+      # rule: the version is the **value** of this gauge and not a label.
+      # `count by (epoch)` thereby groups everything into one bucket, the number
+      # is always 1, and the rule would fire **never** -- the same silent way as
+      # `histogram_quantile` on a summary and a comparison without `on()`.
+      # `count_values` first turns the value into a label.
+      - alert: TardigradeSignerGenerationsDiverge
+        expr: count(count_values("epoch", tg_identity_signer_epoch)) > 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The signer seats hold different versions"
+          description: >-
+            A refresh has not arrived at all five seats (ADR-0107). During a
+            refresh that is briefly normal; if it persists, one seat runs a
+            different version from the rest and no longer contributes to any
+            group signature. `tgctl cluster signer-refresh` again, and read the
+            lagging node's log.
+
+      # **A seat with a foreign group key is a silent shrinking** (ADR-0107). It
+      # starts without complaint, and its share makes every aggregation fail in
+      # which it takes part -- `frost::aggregate` accuses it, but its `Display`
+      # does not name the identifier (measured). For the cluster that means:
+      # "two failures tolerated" becomes one, and nothing about it would be
+      # visible.
+      #
+      # A refresh expressly leaves the key **the same** -- a deviation is
+      # therefore never a transition but always wrong material. Hence ten
+      # minutes and `critical`, while the version rules wait an hour.
+      - alert: TardigradeSignerGroupsDiverge
+        expr: count(count by (fingerprint) (tg_identity_signer_group_info)) > 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Not all signer seats run the same group"
+          description: >-
+            At least one seat holds a different group key from the rest
+            (ADR-0107) -- almost always swapped material under
+            `<data-dir>/signing/`. It contributes to no group signature, and the
+            fault tolerance drops silently by one failure. The fingerprint
+            stands on the label, `up`/`instance` names the process; the material
+            belongs copied anew from the right seat.
+
+      - alert: TardigradeDnsZonesDiverge
+        expr: tg_cluster_dns_zones > 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The cluster serves more than one DNS zone"
+          description: >-
+            A bare name resolves nevertheless; a workload with a fully qualified
+            name finds its target on one node and not on the other (ADR-0013).
+
+      # The same construction, but the number counts the **posture** and not the
+      # value: different ranges are no error (ADR-0091), a node **without** a
+      # mapping beside hardened ones very much is. `for:` generous, because a
+      # rolling rollout of the hardening looks exactly like that -- what is
+      # meant to stand out is the skew that stays.
+      - alert: TardigradeUserNamespaceSkew
+        expr: tg_cluster_userns_postures > 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Not every node maps container identifiers"
+          description: >-
+            On at least one node uid 0 in the container is uid 0 on the node --
+            a breakout ends there as root (ADR-0017, ADR-0091). Which one:
+            `tgctl cluster nodes`, line `userns`.
+
+      # Detach is a decree, not an outage (ADR-0054). What is meant to stand out
+      # is the **forgotten** detach.
+      - alert: TardigradeNodeStaysDetached
+        expr: tg_node_attached == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.node }} has been detached for an hour"
+          description: >-
+            It accepts nothing, gives everything up and reports nothing. Bring
+            it back with `tgctl node attach` (ADR-0054).
+
+      # The declaration takes effect at the next start, and the restart is an
+      # action (ADR-0070/0071). A day is the deadline from which it looks
+      # forgotten.
+      - alert: TardigradeDeclarationOutstanding
+        expr: tg_workload_stale == 1
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.workload }} runs with an old declaration"
+          description: >-
+            Deliver with `tgctl cluster restart` (ADR-0071).
+
+      # A declared readiness probe that no instance answers (ADR-0080). Then the
+      # name no longer resolves, and the service is gone for its clients —
+      # although the containers run.
+      #
+      # `for: 2m` gives the **start-up** time: a just-started instance is not
+      # listening yet and rightly appears unready. It is probed per reconcile
+      # (default 10 s), so two minutes are about twelve questions.
+      #
+      # A restart is expressly **not** the automatic answer (ADR-0080,
+      # determination 7): an overloaded workload does not answer, and a restart
+      # would make the overload worse.
+      # **The partial outage, before the critical one.** One of two replicas no
+      # longer serving is in an environment with 4-9 to 5-9 exactly the warning
+      # one wants to have -- `== 0` catches only the total outage. Writable only
+      # with the denominator (ADR-0080).
+      #
+      # `sum by (workload)` over the nodes: a workload's instances lie with
+      # `spread=rack` on different ones (ADR-0011), and both numbers count per
+      # node. The comparison is `<` and not a ratio -- a ratio would hide
+      # whether one of two or nine of ten are missing.
+      - alert: TardigradeWorkloadPartiallyReady
+        expr: >-
+          sum by (workload) (tg_workload_ready)
+            < sum by (workload) (tg_workload_probed)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.workload }} does not serve all instances"
+          description: >-
+            At least one instance does not answer its readiness probe and is not
+            resolved (ADR-0013); the rest carry the traffic. Which one it is is
+            said by `tgctl cluster show` (line unready) and its node's log.
+            Counted are only **running** instances -- one that is not running at
+            all stands in `tg_workload_restarts_total`.
+
+      - alert: TardigradeWorkloadNotReady
+        expr: tg_workload_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.workload }} serves no instance"
+          description: >-
+            No instance answers its readiness probe; the name no longer resolves
+            (ADR-0013). The node's log names the reason per instance (refused
+            means it does not bind, timeout means it hangs). Restart with
+            `tgctl cluster restart` (ADR-0071).
+
+      # **The denominator of the placement** (ADR-0011, ADR-0034). The planner
+      # behaves correctly -- six instances on five racks yield five placements
+      # and one refusal --, but the refusal goes into the leader's log and
+      # nowhere else. Without this rule nobody sees that the cluster cannot
+      # place something.
+      #
+      # **No leader combination** (ADR-0088): the rule does not aggregate, and
+      # `for: 15m` lies exactly on the expiry window -- the frozen series of a
+      # leader that has stepped down disappears afterwards and cannot trigger
+      # it. And it has to be long, because a freshly declared workload needs a
+      # few passes until all instances lie.
+      - alert: TardigradeWorkloadPartiallyPlaced
+        expr: tg_workload_placed < tg_workload_replicas
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.workload }} is not completely placed"
+          description: >-
+            At least one instance has no node. Which one is said by
+            `tgctl cluster show` (line placed, with the numbers without a node);
+            **why** is said by `tg_scheduler_unplaceable` -- the class with the
+            value above zero names the place to look
+            (`no_domain_left` topology, `no_room` capacity,
+            `node_detached` and `pinned_to_draining_node` a decree,
+            `stateful_node_gone` a DR case). The most frequent cause is more
+            `replicas` than failure domains at the level from `spread` -- what
+            is unsatisfiable is refused and not softened (ADR-0011). Where that
+            hurts: the missing instance is the one that is missing after the
+            outage of a domain.
+
+      # The membership stands in the **log**, the addresses in every process's
+      # configuration. Whoever admits a node and forgets `--peer` on one of the
+      # others notices nothing -- until precisely that one takes the lead and
+      # cannot replicate to the peer. The only trace would otherwise be
+      # `tg_raft_rpc_failures_total`, and that comes too late.
+      #
+      # `for` is generous, because the number may rightly be positive shortly
+      # after a membership change: the configuration follows the log, not the
+      # other way round.
+      - alert: TardigradePeerListIncomplete
+        expr: tg_raft_peers_missing > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.node }} does not know all voters"
+          description: >-
+            Its `--peer` list does not cover the membership. As long as it does
+            not lead, it does not stand out; if it takes over, it does not
+            replicate to the missing peer. **Which** one is missing stands in
+            the warning in this node's log. Remedy: add `--peer` and restart the
+            process.
+
+      # If the descriptors run out, no listener accepts any more. The alert rule
+      # forms the distance instead of waiting for the first report.
+      - alert: TardigradeDescriptorsRunningOut
+        expr: tg_process_open_fds / tg_process_max_fds > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A process is approaching its descriptor limit"
+          description: >-
+            On exhaustion no listener accepts any more — mesh, egress, name
+            resolution and the workload API socket. On **complete** exhaustion
+            the scrape itself fails, and then `up == 0` is the signal.
+
+      # ADR-0113: every **newly** created writable volume is a LUKS container.
+      # Existing ones in plaintext are expressly **not** silently converted --
+      # that would be a data migration without a way back, precisely where an
+      # outage is most expensive. The way is snapshot, new volume, restore
+      # (ADR-0099), and it is operator work.
+      #
+      # This rule **is** the work list. A `0` is no misbehaviour of the system
+      # but a data carrier that would be readable on removal -- exactly the
+      # threat against which ADR-0027 demands the encryption and about which
+      # `tgctl node remove` today only warns.
+      #
+      # `for` is generous, because nothing is urgent here: what has been
+      # unencrypted for a day has been so since creation, and a freshly created
+      # volume carries the encryption anyway.
+      - alert: TardigradeVolumeUnencrypted
+        expr: tg_volume_encrypted == 0
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Volume {{ $labels.volume }} lies in plaintext"
+          description: >-
+            It stems from the time before ADR-0113. It is not converted by
+            itself; the way is snapshot, new volume, restore. Until then this
+            node's data carrier is readable on removal.
+
+      # ADR-0099: the answer to "the node is gone" is for a single-instance
+      # workload with a writable volume expressly **not** failover but
+      # snapshot/restore DR (ADR-0027, ADR-0011: `StatefulNodeGone` refuses a
+      # re-placement). Without a snapshot there is then no recovery.
+      #
+      # `for` is generous: a freshly created volume rightly has none yet, and
+      # the decree comes over the log (ADR-0099, determination 5). What is meant
+      # to stand out is the volume that has **permanently** none.
+      - alert: TardigradeVolumeWithoutSnapshot
+        expr: tg_volume_snapshots == 0
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Volume {{ $labels.volume }} has no snapshot"
+          description: >-
+            If the node fails, there is no recovery for this volume: a writable
+            volume is node-pinned and is not moved (ADR-0027). Remedy:
+            `tgctl cluster snapshot-volume <v> <node> <generation>`.
+
+      # And the opposite direction: there is one, but it is old. **The threshold
+      # is a start value** -- which RPO an installation needs is said only by its
+      # operations (the same boundary as with the other thresholds of this
+      # file).
+      #
+      # A **point in time** and not an age, hence the subtraction here: an age
+      # would have to be advanced by somebody and would be wrong between two
+      # advances -- and in the dangerous direction at that (ADR-0057, ADR-0088).
+      - alert: TardigradeSnapshotStale
+        expr: >-
+          tg_volume_snapshots > 0
+          and (time() - tg_volume_snapshot_timestamp_seconds) > 7 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The most recent snapshot of {{ $labels.volume }} is old"
+          description: >-
+            A recovery from it loses everything written since. The seven days
+            are a **start value**; which RPO applies is decided by operations.
+
+      # **ADR-0104 decided the deadline, and with that this rule became
+      # writable.** A tombstone lives **until it is executed** -- the coupling to
+      # ADR-0020, with which it long stood here as open, was measured to be
+      # wrong: the record is the `DeleteVolume` entry in the log and stays
+      # anyway, in the state lies the not yet executed **instruction**.
+      #
+      # The execution takes seconds -- slice, execution, report,
+      # `RetireTombstone` --, so an hour is ample. What stands out is the
+      # deletion that does **not** arrive, and its three measured causes: the
+      # node is permanently gone (then it belongs out with `tgctl node remove`,
+      # which takes its tombstones along), its report does not reach the leader,
+      # or its tombstone list is unreadable (then its log says "tombstones
+      # unreadable").
+      #
+      # **No leader combination** (ADR-0088): the rule does not aggregate, and
+      # its `for` duration lies far above the expiry window -- a frozen series of
+      # a leader that has stepped down disappears after 15 minutes and cannot
+      # trigger it.
+      - alert: TardigradeTombstoneNotExecuted
+        expr: tg_cluster_volume_tombstones > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "A volume deletion has not been executed for an hour"
+          description: >-
+            An operator issued `tgctl cluster delete-volume`, and a node has not
+            confirmed the deletion (ADR-0104). The data still lies there while
+            the cluster considers it deleted -- and the instruction travels along
+            in every slice and in every snapshot. Which node it is is said by
+            `tgctl cluster volumes`.
+
+      # ADR-0101: **the incident that no automatism repairs.** A single writer
+      # that holds the active role and whose probe is mute stays that way until a
+      # human acts -- the lease hangs expressly on the **report** and not on the
+      # probe, because a role change would let the standby start up on its
+      # **own** volume (ADR-0027) and a false-negative probe would thereby
+      # trigger a data split.
+      #
+      # This rule is therefore the consideration for the decision: what the
+      # system does not repair itself, it must **report**. The remedy is
+      # `tgctl cluster restart` -- a restart does not take the instance's role
+      # away, it comes back with the same volume.
+      #
+      # `for` is a workload's start-up time: immediately after a restart "role
+      # there, probe mute" is the normal case.
+      - alert: TardigradeActiveRoleWithoutReadiness
+        expr: >-
+          tg_workload_active_role == 1
+          and on(workload) (tg_workload_probed > 0 and tg_workload_ready == 0)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.workload }} holds the active role and does not answer"
+          description: >-
+            The warm standby does **not** take over -- the lease hangs on the
+            node's report, not on the probe (ADR-0101). That is a deliberate
+            choice against automation: a role change lets the standby start up
+            on its own volume. Remedy:
+            `tgctl cluster restart {{ $labels.workload }} <generation>`.
+
+      # ADR-0100: the number stands only while a rotation runs -- and as long as
+      # it is above zero, `secrets.key.previous` must not go. Whoever removes it
+      # too early makes every not re-keyed value **unreadable**, and the
+      # container that needs it no longer starts (ADR-0098, determination 7).
+      #
+      # `for` is generous: a rotation is a multi-step operation, and between step
+      # 2 and 3 the number rightly stands high. What is meant to stand out is the
+      # rotation that **stalls** -- then the old key stands on every node, and
+      # nobody clears it away.
+      - alert: TardigradeRotationStalled
+        expr: tg_cluster_secrets_previous > 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "A data key rotation is not complete"
+          description: >-
+            {{ $value }} secret(s) still carry the key being retired. Remedy:
+            `tgctl cluster secret rekey`. **Only afterwards** may
+            `secrets.key.previous` go from the nodes -- otherwise these values
+            are unreadable.
+
+      # **And the last step one forgets.** The time series stands **only** as
+      # long as `secrets.key.previous` lies on a node (ADR-0100) -- a zero
+      # therefore means: everything is re-keyed, and the key being retired is
+      # nevertheless still lying there.
+      #
+      # That weighs, because it is a **security** remainder and not a functional
+      # one: whoever ever gets hold of this file reads every ciphertext of its
+      # validity period out of the log, and that is retained (ADR-0020).
+      # ADR-0100 names as a cost item, "visible is that only from the file being
+      # there" -- with this rule it is reported.
+      #
+      # `for: 1h` gives an operator the time between step 5 and 6.
+      - alert: TardigradeRetiredKeyStillPresent
+        expr: tg_cluster_secrets_previous == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The retired data key still lies on a node"
+          description: >-
+            No secret carries it any more, but the file is still there. Remedy:
+            remove `secrets.key.previous` on every tgd node and restart the
+            process -- whoever ever gets hold of it reads every ciphertext of its
+            validity period out of the log.
+
+# ## Metrics without a rule, with a reason
+#
+#   tg_volume_size_bytes / tg_volume_declared_bytes
+#       A deviation means: the declared size is not yet in effect (ADR-0063).
+#       Whether that is an incident hangs on how much space the workload really
+#       needs — only an operator knows that.
+#
+#   tg_dns_answers_total{outcome="refused"}
+#       The **normal case** for every name outside the zone without an egress
+#       permission (ADR-0041). A threshold on it would be a threshold on
+#       deny-by-default.
+#
+#   tg_node_key_generation_lag
+#       A rotation that does not arrive (ADR-0055). The deadline for it is a
+#       policy question: the generation follows a calendar, and how long a node
+#       may lag is not decided.
+#
+#   tg_agent_reconcile_seconds
+#       Runtime of the reconcile. A threshold on it hangs on the number of
+#       instances per node.
+#
+#   tg_consensus_applied_total / tg_audit_records_total /
+#   tg_agent_reconcile_total / tg_identity_svid_issued_total
+#       Counters of the **ordinary work**. They say that something is running,
+#       and their rate hangs on the size of the installation -- a threshold
+#       would be a different one per cluster. Their absence is covered by the
+#       watchdog (`/livez`) or `tg_task_alive`, and that is the sharper
+#       statement.
+#
+#   tg_audit_bytes / tg_audit_segments
+#       What the audit archive occupies on the node and how many **sealed**
+#       segments lie there (ADR-0132). Nothing is deleted here: what lies there
+#       is evidence that nobody has yet pushed into the WORM archive
+#       (ADR-0020) -- a deadline or an upper bound would hit it precisely when
+#       the export is not running (the reversal from ADR-0104).
+#
+#       **No threshold, because we do not know it:** the number from which it
+#       gets tight is the node's disk size. The building blocks stand here, and
+#       the numbers for them in the operations manual: 414 bytes per record,
+#       around 9500 records a day per single-writer workload (the lease renewal
+#       every 9.1 s, ADR-0064), i.e. 1.34 GiB a year for **one** workload; a
+#       segment of the default size is full after 10.5 days.
+#
+#       Whoever wants a rule of their own: `tg_audit_bytes > <fraction of the
+#       disk>` for the space, and `tg_audit_segments` for the export cadence --
+#       it rises permanently precisely when nobody pushes anything away any
+#       more. Until ADR-0132 the first signal was an `apply` that could no
+#       longer write, and that stops the node (deliberate, ADR-0020).
+#
+#   tg_node_devices_assigned
+#       How many devices of a kind a node has assigned (ADR-0145).
+#
+#       **No rule, because there is no wrong value.** All devices assigned is
+#       the **wanted** state of a node with accelerators -- a threshold on it
+#       would alarm on success. That none is free any more and one is
+#       nevertheless needed is said by `tg_node_pressure` and in the worst case
+#       `tg_scheduler_unplaceable_total` (ADR-0127).
+#
+#       **What it is there for** is a comparison: `tg_node_free` for the same
+#       `resource` is the **leader's** calculation, this number the node-local
+#       truth. If they diverge, something between consensus and node is not
+#       right -- and until ADR-0145 nobody could see that. A rule on it would be
+#       possible; it needs, however, a way of having both in the same query, and
+#       that hangs on the labels of the scrape target.
+#
+#       **Which** device an instance holds stands expressly not here but in the
+#       log (`devices assigned`): the name is a different one per node and one
+#       per instance -- as a label the memory leak from ADR-0015.
+#
+#   tg_container_cpu_limit_cores
+#       A container's CPU limit in cores (ADR-0144).
+#
+#       **No rule, and expressly not out of symmetry with the memory limit.**
+#       Reaching a CFS quota is the **normal case** of a fully utilized workload
+#       and no incident: the damage is slowness, not loss -- exactly the
+#       asymmetry with which ADR-0086 gives the sidecar a memory limit and no
+#       quota.
+#
+#       The number nevertheless stands there, because without it
+#       `tg_container_cpu_seconds_total` beside it has no yardstick: a rate of
+#       0.4 cores is much at a limit of 0.5 and little at four.
+#
+#       Whoever wants a rule of their own:
+#       `rate(tg_container_cpu_seconds_total[5m]) / tg_container_cpu_limit_cores`
+#       -- and the threshold on it belongs to operations, because it says how
+#       much throttling a workload tolerates.
+#
+#   tg_proxy_connections / tg_proxy_connections_total
+#       How many connections a sidecar currently holds and how many it has
+#       accepted, per listener (ADR-0114).
+#
+#       **No rule, because they are a measurement and not a signal.** They
+#       answer the open point from ADR-0114: the load shape of the benchmark
+#       (four connections per shard) was a choice and not a derivation, because
+#       nobody reported what a sidecar really sees in operation. From here on
+#       somebody reports it.
+#
+#       A threshold on it would be a threshold on the number of a workload's
+#       counterparts -- a different one per installation, and a value an
+#       operator sets themselves. What goes wrong is said by the metrics beside
+#       it: `tg_proxy_decisions_total{outcome}` for refused connections,
+#       `tg_task_alive` for a listener that no longer exists.
+#
+#       Whoever wants a rule of their own: a permanent zero on `mesh_inbound`
+#       for a workload with edges means that nobody reaches it -- and that is
+#       the question for which until ADR-0114 there was no number.
+#
+#   tg_identity_workload_api_calls_total
+#       Who uses the workload API socket, per workload (ADR-0079).
+#
+#       **No rule, because there is no wrong value.** A workload that never uses
+#       it is no error -- it simply does not speak its own mTLS, and since
+#       ADR-0079 **every** container gets the socket, including those that do
+#       not need it. The number answers "who speaks their own mTLS", and that is
+#       a piece of information and not an incident.
+#
+#       That an issuance **fails** is said by
+#       `tg_identity_svid_issued_total{outcome="refused"}` -- the alert rule
+#       stands there too, and a refused call expressly does not appear here: it
+#       has no workload name, for the attestation is precisely what failed
+#       (ADR-0081).
+#
+#   tg_proxy_egress_unroutable_total / tg_proxy_egress_attempts_failed_total
+#       Addresses of an endpoint that have no route in the namespace, and
+#       connection attempts that failed (ADR-0136).
+#
+#       **No rule, and both for different reasons.** The first counts something
+#       that occurs **constantly** in normal operation: every dual-stack name
+#       has an AAAA, and the overlay is IPv4 (ADR-0012) -- a threshold on it
+#       would be a threshold on the number of endpoints. The second counts the
+#       **single** attempt and not the outcome: a later one may succeed, and
+#       then the address list has done what it exists for.
+#
+#       What they are there for is the diagnosis. What a container learns of a
+#       failed egress is silence (ADR-0041). Whoever pursues a "it does not get
+#       out" reads both:
+#
+#         unroutable rises, attempts_failed does not  -> the endpoint is
+#                                                       v6-only; it is not
+#                                                       reachable here
+#         attempts_failed rises with unchanged success
+#                                                    -> one address of the
+#                                                       endpoint is dead
+#
+#   tg_proxy_decisions_total{outcome="deny"}
+#       Deny-by-default at work (ADR-0025) -- the same reason as with
+#       `dns_answers_total{outcome="refused"}`. Who may not reach whom stands in
+#       the sidecar's log; a threshold on the rate would be a threshold on the
+#       rule itself.
+#
+#   tg_cluster_udp_egress_workloads
+#       How many workloads have an **address-based** egress permission
+#       (ADR-0092, determination 6). Plain UDP knows no name on the wire: the
+#       agent resolves it and lays one rule per address -- the coarser
+#       enforcement, and the price stands in the ADR (an address that changes
+#       owner within a refresh window stays permitted that long). **No
+#       threshold**, because every number on it would be an operational
+#       decision: for some a single workload is too many, for others it is the
+#       long tail that ADR-0092 foresaw as an honest fallback. What it provides
+#       is the statement an auditor demands -- **how many** units make use of it.
+#       **Which** ones is said by `tgctl cluster show`.
+#
+#   tg_scheduler_unplaceable
+#       **Why** an instance could not be placed, per class (ADR-0011). It is the
+#       **diagnosis** and not a second alarm: that something is missing is said
+#       by `TardigradeWorkloadPartiallyPlaced` already -- and for all seven
+#       classes the same situation at that, for an instance without a node is an
+#       instance without a node. What the class adds is the **place** at which an
+#       operator has to look; a threshold per class would be the same alarm seven
+#       times.
+#
+#       It stands **always** and with all seven classes, even when nothing was
+#       refused: a time series that appears only on a finding is
+#       indistinguishable from a missing one -- and `no_room = 0` is the
+#       information that sends an operator away from capacity.
+#
+#   tg_node_pressure
+#   tg_node_free
+#       How full a node is and what it is still enough for (ADR-0127). **No
+#       rule**: there is no threshold that belongs to us. How full is too full
+#       hangs on how much room an operator wants to have -- and they have said
+#       that once already with the **reserve** per node (ADR-0047); it is
+#       already subtracted here, the denominator is the plannable capacity.
+#
+#       A rule at `tg_node_pressure >= 1` would be the refusal that already
+#       exists (`tg_scheduler_unplaceable`), only named earlier: at that point
+#       the node is full. What is missing is the **early warning**, and its
+#       distance belongs to operations.
+#
+#       Whoever wants a rule of their own has the building blocks:
+#       `max(tg_node_pressure) > 0.8 for 30m` as an early warning, and
+#       `tg_node_free{resource="memory-bytes"}` beside it, to see **which**
+#       resource is getting scarce -- the pressure is the maximum over the
+#       resources and does not name them (ADR-0109).
+#
+#       **It decides nothing** (ADR-0011, no auto-rebalancing): nothing is moved
+#       because of it. It is a piece of information **before** the `NoRoom`
+#       instead of a `NoRoom` in the middle of it.
+#
+#   tg_content_reclaimed_bytes_total
+#   tg_content_reclaimed_layers_total
+#       What the content GC has released (ADR-0126). **No rule**: there is no
+#       threshold that belongs to us -- how much a store *should* release hangs
+#       on how often an operator renews their images.
+#
+#       They are the **counter-check against silence**. The GC does not run if
+#       one of its three guards bites: an empty desired state without
+#       confirmation (ADR-0058), isolated entries (ADR-0062), a bundle left
+#       behind (ADR-0119/0122). Those are the cases in which something *else* is
+#       not right -- and without these counters a disk that no longer shrinks
+#       would be indistinguishable from a GC that never runs.
+#
+#       Whoever wants a rule of their own:
+#       `rate(tg_content_reclaimed_bytes_total[1h])` beside the disk's fill
+#       level. If the counter stands still while the disk grows, a guard bites --
+#       the reason is named by the node's log (`content GC deferred`).
+#
+#   tg_container_memory_bytes
+#   tg_container_memory_peak_bytes
+#   tg_container_cpu_seconds_total
+#       What a container occupies in memory and has consumed in CPU (ADR-0118),
+#       labels `workload` and `replica`. **No rule, and not out of
+#       negligence**: there is no threshold that belongs to us. Both numbers are
+#       the **input** for a decision an operator takes -- `<resources>` in the
+#       declaration and the surcharge per mesh instance
+#       (`tgctl cluster sidecar-overhead`, ADR-0067). What is too much is known
+#       only by whoever set the limit.
+#
+#       An alarm belongs at the **consequence**, not at the number: if the memory
+#       limit is breached, the container dies, and that is said by the actual
+#       state (`TardigradeWorkloadNotComingUp`). A second rule on the consumption
+#       would be the same finding earlier and with a threshold somebody would
+#       have to guess.
+#
+#       Whoever wants a rule of their own has the building blocks:
+#       `tg_container_memory_bytes` against the set limit, and
+#       `rate(tg_container_cpu_seconds_total[5m])` for the millicores. The
+#       counter jumps to zero at a restart, because the container gets a new
+#       cgroup -- `rate()` recognizes that.
+#
+#       **A missing series does not mean "consumes nothing".** It can also mean
+#       that the `memory` or `cpu` controller is not released in the parent; then
+#       the files are missing, and ADR-0118 determination 5 prefers to set
+#       nothing over a zero. For `tg_container_memory_peak_bytes` a second reason
+#       comes along: under Linux 5.19 there is no `memory.peak`. That is **no**
+#       operational prerequisite -- this one time series is then missing, and the
+#       instantaneous value stands there as before (ADR-0123, determination 2).
+#
+#       **And the limit is set from the peak, not from the instantaneous
+#       value** (ADR-0123). Measured on a real cgroup: a process that goes to
+#       200 MiB and releases stands at 0.5 MiB half a second later -- factor 425.
+#       A scrape every 15 s does not see a peak between two measurements at all,
+#       and whoever derives the limit from `tg_container_memory_bytes` sets it
+#       below the need. That is exactly the underestimation ADR-0086 describes as
+#       the OOM killer. The peak **rises and does not fall** as long as the
+#       container runs; at a restart it begins anew, because the container gets a
+#       fresh cgroup.
+#
+#   tg_proxy_quic_egress_flows
+#   tg_proxy_quic_egress_refused_total
+#       How many QUIC flows a sidecar holds and which datagrams it has not let
+#       out (ADR-0121). **No rule, and not out of negligence** -- but the reason
+#       is a different one from the two numbers above: here there very much is a
+#       threshold that belongs to us (`MAX_FLOWS`, 512 per sidecar), and an alarm
+#       on it would nevertheless be misaddressed.
+#
+#       Whoever reaches the limit is the **container**, not the node. A workload
+#       that holds 512 simultaneous QUIC connections to the outside is either
+#       doing something legitimate -- then the answer is a declaration that needs
+#       more, and not a page to the on-call -- or it is running amok, and then
+#       the limit is exactly what is meant to bite: it has already protected the
+#       sidecar (ADR-0086, ADR-0019). An alarm would report in both cases that
+#       something **worked**.
+#
+#       The numbers stand there for the diagnosis afterwards. What a container
+#       learns when its datagram may not go out is silence (ADR-0041) -- and
+#       silence is indistinguishable from a network problem. Whoever pursues a
+#       "QUIC does not work" reads
+#       `tg_proxy_quic_egress_refused_total{reason=...}`: `not_allowed` means a
+#       missing permission, `too_many` means the limit, `anonymous` means a
+#       ClientHello without SNI. The remaining six have named their cause
+#       individually since ADR-0131, and three of them do **not** mean that no
+#       QUIC client is speaking there:
+#
+#         not_initial   no Initial begins here -- typically a connection
+#                       migration (the client changes the source port). It is
+#                       refused, permanently and with a reason: a short header
+#                       does not name its CID length, and the CID after it
+#                       travels 1-RTT-protected. Whoever needs it takes TCP.
+#         version       a QUIC version this sidecar does not read (it reads v1).
+#                       **Which** one stands in the node's log -- in the label
+#                       the number would be unbounded.
+#         undecryptable a wrong connection ID: typically a `Retry` that crossed
+#                       the decision. It heals itself in one round trip and
+#                       occupies no place.
+#         malformed     the frame is really broken.
+#         too_much      the client breached a bound of the reassembler
+#                       (ADR-0092).
+#         not_tls       reassembled, but not a ClientHello.
+#
+#       Whoever wants a rule of their own has the building blocks:
+#       `tg_proxy_quic_egress_flows / 512` as the fill level per sidecar, and
+#       `rate(tg_proxy_quic_egress_refused_total{reason="too_many"}[5m]) > 0`
+#       for the moment at which the limit bites.
+#
+#       **Until ADR-0130 `too_many` did not necessarily mean that.** A flow's
+#       deadline (`IDLE`, one minute) ran only if a datagram arrived on the
+#       **same** listener -- measured, one listener held its 512 places over 100
+#       deadlines, and because the budget belongs to the whole sidecar
+#       (ADR-0121), **another** permitted port got `too_many` for it,
+#       permanently. A sidecar of an older state therefore possibly shows a fill
+#       level behind which no connection stands any more; there only a restart of
+#       the workload helps (the sidecar hangs on it, ADR-0009). From ADR-0130 on
+#       every listener sweeps by the clock, and both numbers again say what their
+#       name says.

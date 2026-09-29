@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Beyond 65535 there is no TCP port. A value that fits only as a number but not
+  as a port belongs refused on reading.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <mesh port="65536"/>
+  </workload>
+</workloads>

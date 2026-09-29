@@ -1,0 +1,550 @@
+//! This example showcases an advanced usage pattern of the XSD code generation
+//! pipeline, where the components - `Parser`, `Interpreter`, `Optimizer`, and
+//! `Generator` - are used individually rather than through the high-level `generate`
+//! function.
+//!
+//! This modular approach allows for detailed control over each phase:
+//! - **`Parser`** loads and resolves XSD schema files.
+//! - **`Interpreter`** analyzes the parsed schema and extracts semantic type
+//!   information.
+//! - **`Optimizer`** transforms and simplifies the type data.
+//! - **`Generator`** produces Rust code based on the refined type definitions.
+//!
+//! In contrast to the simpler `Config`-based interface, this setup provides full
+//! flexibility for customization, experimentation, and debugging of each step.
+//!
+//! Additionally, this example defines and registers a custom renderer, which
+//! overrides the default rendering logic used by the generator. This custom
+//! renderer allows fine-tuned control over how specific types—such as enums,
+//! unions, complex structs and references are converted into Rust code. It can
+//! be used to inject specific attributes, formatting, or behaviors needed for
+//! integration with your application.
+
+#![allow(missing_docs)]
+
+use std::fs::write;
+use std::path::PathBuf;
+use std::str::FromStr;
+
+use anyhow::Error;
+use clap::Parser as ClapParser;
+use proc_macro2::{Ident as Ident2, TokenStream};
+use quote::{quote, ToTokens};
+use tracing_subscriber::{fmt, EnvFilter};
+
+use xsd_parser::{
+    config::{GeneratorFlags, OptimizerFlags, ParserFlags, Schema, TypedefMode},
+    generate,
+    models::{
+        code::IdentPath,
+        data::{
+            ComplexData, ComplexDataAttribute, ComplexDataContent, ComplexDataElement,
+            ComplexDataEnum, ComplexDataStruct, CustomData, DataTypeVariant, DynamicData,
+            EnumerationData, EnumerationDataVariant, Occurs, ReferenceData, SimpleData, UnionData,
+            UnionTypeVariant,
+        },
+    },
+    pipeline::renderer::{Context, RenderStep, RenderStepType},
+    Config,
+};
+
+fn main() -> Result<(), Error> {
+    // Initialize the logging framework. Log output can be controlled using the
+    // `RUST_LOG` environment variable.
+    fmt()
+        .without_time()
+        .with_file(true)
+        .with_level(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .pretty()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    // Parse the command line arguments
+    let args = Args::parse();
+    tracing::info!("Run with arguments: {args:#?}");
+
+    // Canonicalize all input files, to ensure that the files exists and that
+    // the path is valid. Store it in a vector for further processing.
+    let schemas = args
+        .inputs
+        .into_iter()
+        .map(|p| p.canonicalize())
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(Schema::File);
+
+    // Create a suitable configuration for the generator using our custom render step
+    let config = Config::default()
+        .with_schemas(schemas)
+        .with_parser_flags(ParserFlags::all())
+        .with_optimizer_flags(OptimizerFlags::all())
+        .with_generator_flags(GeneratorFlags::all())
+        .with_render_step(CustomRenderStep);
+
+    // Execute the generator
+    let code = generate(config)?.to_string();
+
+    // Write the generated code to the output file
+    write(&args.output, code)?;
+
+    Ok(())
+}
+
+/// Simple command line tool to generate code out of any XML schema that is
+/// passed as input argument.
+#[derive(Debug, ClapParser)]
+struct Args {
+    /// Write additional debut output in the output directory.
+    #[arg(short, long)]
+    enable_debug_output: bool,
+
+    /// Path to write the generated code to.
+    #[arg()]
+    output: PathBuf,
+
+    /// Paths to read the schema files from.
+    #[arg()]
+    inputs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomRenderStep;
+
+impl RenderStep for CustomRenderStep {
+    fn render_step_type(&self) -> RenderStepType {
+        RenderStepType::Types
+    }
+
+    fn render_type(&mut self, ctx: &mut Context<'_, '_>) {
+        match &ctx.data.variant {
+            DataTypeVariant::BuildIn(_) => (),
+            DataTypeVariant::Custom(ty) => self.render_custom(ty, ctx),
+            DataTypeVariant::Union(ty) => self.render_union(ty, ctx),
+            DataTypeVariant::Dynamic(ty) => self.render_dynamic(ty, ctx),
+            DataTypeVariant::Reference(ty) => self.render_reference(ty, ctx),
+            DataTypeVariant::Enumeration(ty) => self.render_enumeration(ty, ctx),
+            DataTypeVariant::Simple(ty) => self.render_simple(ty, ctx),
+            DataTypeVariant::Complex(ty) => self.render_complex(ty, ctx),
+        }
+    }
+}
+
+#[allow(clippy::unused_self)]
+impl CustomRenderStep {
+    /* Custom */
+
+    fn render_custom(&self, ty: &CustomData<'_>, ctx: &mut Context<'_, '_>) {
+        let Some(include) = ty.meta.include() else {
+            return;
+        };
+
+        ctx.add_usings([include]);
+    }
+
+    /* Union */
+
+    fn render_union(&self, ty: &UnionData<'_>, ctx: &mut Context<'_, '_>) {
+        let UnionData {
+            type_ident,
+            trait_impls,
+            variants,
+            ..
+        } = ty;
+
+        let derive = get_derive(ctx, Option::<String>::None);
+        let trait_impls = render_trait_impls(type_ident, trait_impls);
+        let variants = variants
+            .iter()
+            .map(|var| self.render_union_variant(var, ctx));
+
+        let code = quote! {
+            #derive
+            pub enum #type_ident {
+                #( #variants )*
+            }
+
+            #( #trait_impls )*
+        };
+
+        ctx.current_module().append(code);
+    }
+
+    fn render_union_variant(
+        &self,
+        var: &UnionTypeVariant<'_>,
+        ctx: &Context<'_, '_>,
+    ) -> TokenStream {
+        let UnionTypeVariant {
+            variant_ident,
+            target_type,
+            ..
+        } = var;
+
+        let target_type = ctx.resolve_type_for_module(target_type);
+
+        quote! {
+            #variant_ident ( #target_type ),
+        }
+    }
+
+    /* Dynamic */
+
+    fn render_dynamic(&self, ty: &DynamicData<'_>, ctx: &mut Context<'_, '_>) {
+        let DynamicData {
+            type_ident,
+            trait_ident,
+            sub_traits,
+            ..
+        } = ty;
+
+        let derive = get_derive(ctx, Option::<String>::None);
+        let trait_impls = render_trait_impls(type_ident, &[]);
+        let dyn_traits = sub_traits.as_ref().map_or_else(
+            || get_dyn_type_traits(ctx),
+            |traits| format_traits(traits.iter().map(|x| ctx.resolve_type_for_module(x))),
+        );
+
+        let code = quote! {
+            #derive
+            pub struct #type_ident(pub Box<dyn #trait_ident>);
+
+            pub trait #trait_ident: #dyn_traits { }
+
+            #( #trait_impls )*
+        };
+
+        ctx.current_module().append(code);
+    }
+
+    /* Reference */
+
+    fn render_reference(&self, ty: &ReferenceData<'_>, ctx: &mut Context<'_, '_>) {
+        let ReferenceData {
+            mode,
+            occurs,
+            type_ident,
+            target_type,
+            trait_impls,
+            ..
+        } = ty;
+
+        let target_type = ctx.resolve_type_for_module(target_type);
+
+        let code = match mode {
+            TypedefMode::Auto => unreachable!(),
+            TypedefMode::Typedef => {
+                let target_type = occurs.make_type(ctx, &target_type, false);
+
+                quote! { pub type #type_ident = #target_type; }
+            }
+            TypedefMode::NewType => {
+                let target_type = occurs.make_type(ctx, &target_type, false);
+                let extra_derive =
+                    matches!(occurs, Occurs::Optional | Occurs::DynamicList).then_some("Default");
+                let derive = get_derive(ctx, extra_derive);
+                let trait_impls = render_trait_impls(type_ident, trait_impls);
+
+                quote! {
+                    #derive
+                    pub struct #type_ident(pub #target_type);
+
+                    #( #trait_impls )*
+                }
+            }
+        };
+
+        ctx.current_module().append(code);
+    }
+
+    /* Enumeration */
+
+    fn render_enumeration(&self, ty: &EnumerationData<'_>, ctx: &mut Context<'_, '_>) {
+        let EnumerationData {
+            type_ident,
+            variants,
+            trait_impls,
+            ..
+        } = ty;
+
+        let derive = get_derive(ctx, Option::<String>::None);
+        let trait_impls = render_trait_impls(type_ident, trait_impls);
+
+        let variants = variants
+            .iter()
+            .map(|var| self.render_enum_variant(var, ctx))
+            .collect::<Vec<_>>();
+
+        let code = quote! {
+            #derive
+            pub enum #type_ident {
+                #( #variants )*
+            }
+
+            #( #trait_impls )*
+        };
+
+        ctx.current_module().append(code);
+    }
+
+    fn render_enum_variant(
+        &self,
+        var: &EnumerationDataVariant<'_>,
+        ctx: &Context<'_, '_>,
+    ) -> TokenStream {
+        let EnumerationDataVariant {
+            variant_ident,
+            target_type,
+            ..
+        } = var;
+
+        let target_type = target_type.as_ref().map(|target_type| {
+            let target_type = ctx.resolve_type_for_module(target_type);
+
+            quote!((#target_type))
+        });
+
+        quote! {
+            #variant_ident #target_type,
+        }
+    }
+
+    /* Simple */
+
+    fn render_simple(&self, ty: &SimpleData<'_>, ctx: &mut Context<'_, '_>) {
+        let SimpleData {
+            type_ident,
+            target_type,
+            trait_impls,
+            ..
+        } = ty;
+
+        let target_type = ctx.resolve_type_for_module(target_type);
+
+        let derive = get_derive(ctx, Option::<String>::None);
+        let trait_impls = render_trait_impls(type_ident, trait_impls);
+
+        let code = quote! {
+            #derive
+            pub struct #type_ident(pub #target_type);
+
+            #( #trait_impls )*
+        };
+
+        ctx.current_module().append(code);
+    }
+
+    /* Complex */
+
+    fn render_complex(&self, ty: &ComplexData<'_>, ctx: &mut Context<'_, '_>) {
+        match ty {
+            ComplexData::Enum {
+                type_,
+                content_type,
+            } => {
+                self.render_complex_enum(type_, ctx);
+
+                if let Some(content_type) = content_type {
+                    self.render_complex(content_type, ctx);
+                }
+            }
+            ComplexData::Struct {
+                type_,
+                content_type,
+            } => {
+                self.render_complex_struct(type_, ctx);
+
+                if let Some(content_type) = content_type {
+                    self.render_complex(content_type, ctx);
+                }
+            }
+        }
+    }
+
+    fn render_complex_enum(&self, ty: &ComplexDataEnum<'_>, ctx: &mut Context<'_, '_>) {
+        let derive = get_derive(ctx, Option::<String>::None);
+        let type_ident = &ty.type_ident;
+        let trait_impls = render_trait_impls(type_ident, &ty.trait_impls);
+
+        let variants = ty
+            .elements
+            .iter()
+            .map(|el| self.render_complex_enum_variant(el, ctx));
+
+        let code = quote! {
+            #derive
+            pub enum #type_ident {
+                #( #variants )*
+            }
+
+            #( #trait_impls )*
+        };
+
+        ctx.current_module().append(code);
+    }
+
+    fn render_complex_enum_variant(
+        &self,
+        el: &ComplexDataElement<'_>,
+        ctx: &Context<'_, '_>,
+    ) -> TokenStream {
+        let variant_ident = &el.variant_ident;
+
+        let target_type = ctx.resolve_type_for_module(&el.target_type);
+        let target_type = el.occurs.make_type(ctx, &target_type, el.need_indirection);
+
+        quote! {
+            #variant_ident(#target_type),
+        }
+    }
+
+    fn render_complex_struct(&self, ty: &ComplexDataStruct<'_>, ctx: &mut Context<'_, '_>) {
+        let derive = get_derive(ctx, Option::<String>::None);
+        let type_ident = &ty.type_ident;
+        let trait_impls = render_trait_impls(type_ident, &ty.trait_impls);
+
+        let attributes = ty
+            .attributes
+            .iter()
+            .map(|attrib| self.render_complex_struct_attrib(attrib, ctx));
+        let fields = ty
+            .elements()
+            .iter()
+            .map(|field| self.render_complex_struct_field(field, ctx));
+        let content = ty
+            .content()
+            .as_ref()
+            .and_then(|content| self.render_complex_struct_content(content, ctx));
+
+        let struct_data = if ty.is_unit_struct() {
+            quote!(;)
+        } else {
+            quote! {
+                {
+                    #( #attributes )*
+                    #( #fields )*
+                    #content
+                }
+            }
+        };
+
+        let code = quote! {
+            #derive
+            pub struct #type_ident
+                #struct_data
+
+            #( #trait_impls )*
+        };
+
+        ctx.current_module().append(code);
+    }
+
+    fn render_complex_struct_attrib(
+        &self,
+        attrib: &ComplexDataAttribute<'_>,
+        ctx: &Context<'_, '_>,
+    ) -> TokenStream {
+        let field_ident = &attrib.ident;
+
+        let target_type = ctx.resolve_type_for_module(&attrib.target_type);
+        let target_type = if attrib.is_option {
+            quote!(Option<#target_type>)
+        } else {
+            target_type
+        };
+
+        quote! {
+            pub #field_ident: #target_type,
+        }
+    }
+
+    fn render_complex_struct_field(
+        &self,
+        field: &ComplexDataElement<'_>,
+        ctx: &Context<'_, '_>,
+    ) -> TokenStream {
+        let field_ident = &field.field_ident;
+
+        let target_type = ctx.resolve_type_for_module(&field.target_type);
+        let target_type = field
+            .occurs
+            .make_type(ctx, &target_type, field.need_indirection)
+            .unwrap();
+
+        quote! {
+            pub #field_ident: #target_type,
+        }
+    }
+
+    fn render_complex_struct_content(
+        &self,
+        content: &ComplexDataContent<'_>,
+        ctx: &Context<'_, '_>,
+    ) -> Option<TokenStream> {
+        let target_type = ctx.resolve_type_for_module(&content.target_type);
+        let target_type = content.occurs.make_type(ctx, &target_type, false)?;
+
+        Some(quote! {
+            pub content: #target_type,
+        })
+    }
+}
+
+/* Helper */
+
+fn get_derive<I>(ctx: &Context<'_, '_>, extra: I) -> TokenStream
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let extra = extra
+        .into_iter()
+        .map(|x| IdentPath::from_str(x.as_ref()).expect("Invalid identifier path"));
+    let types = ctx.derive.iter().cloned().chain(extra).collect::<Vec<_>>();
+
+    if types.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            #[derive( #( #types ),* )]
+        }
+    }
+}
+
+fn get_dyn_type_traits(ctx: &Context<'_, '_>) -> TokenStream {
+    format_traits(ctx.dyn_type_traits.iter().map(|ident| {
+        ctx.add_usings([quote!(#ident)]);
+
+        let ident = ident.ident();
+
+        quote!(#ident)
+    }))
+}
+
+fn format_traits<I>(iter: I) -> TokenStream
+where
+    I: IntoIterator,
+    I::Item: ToTokens,
+{
+    let parts = iter
+        .into_iter()
+        .enumerate()
+        .map(|(i, x)| if i == 0 { quote!(#x) } else { quote!(+ #x) });
+
+    quote! {
+        #( #parts )*
+    }
+}
+
+fn render_trait_impls<'a>(
+    type_ident: &'a Ident2,
+    trait_idents: &'a [TokenStream],
+) -> impl Iterator<Item = TokenStream> + 'a {
+    trait_idents.iter().map(move |trait_ident| {
+        quote! {
+            impl #trait_ident for #type_ident { }
+        }
+    })
+}

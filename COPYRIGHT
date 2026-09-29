@@ -1,0 +1,14 @@
+Copyright 2026 Dana Schlifka
+
+This work stands under the Apache License, Version 2.0 (ADR-0139). The full
+text lies as LICENSE in this directory.
+
+The bundled third-party components stand under their own licences. What is
+shipped and under which licence is named by the bill of materials
+docs/sbom.cdx.json (CycloneDX 1.5) — it is the source from which this file
+repeats its statement, and a test rig holds the two against each other.
+
+Programs that are called in operation and not linked (nft, losetup,
+mkfs.ext4, resize2fs, cryptsetup, youki respectively crun) are no parts of
+this work. They stand under their own licences and in section 1 of the
+operations manual.

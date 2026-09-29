@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The same facet as with <mesh> (ADR-0080 takes the type `Port`): port 0 means
+  "pick one yourself" in the kernel, and as a probe's target that is no setting.
+  The fixture stands beside it because a new use of a type is a new place at
+  which a facet can silently disappear — the pitfall from schema/README.md.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <readiness port="0"/>
+  </workload>
+</workloads>

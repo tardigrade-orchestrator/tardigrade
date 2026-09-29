@@ -1,0 +1,61 @@
+[package]
+name = "tg-telemetry"
+description = "tracing/metrics and the audit journal."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# ADR-0020: the hash chain over the archive segments. `sha2` lies in the tree anyway
+# since ADR-0037 (the token digest).
+sha2 = "0.10"
+serde = { workspace = true }
+# ADR-0134: the archive's read path lies here, where the chain lies -- it reads JSON
+# lines. `serde_json` already lay in the tree.
+serde_json = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
+# ADR-0088: `MetricKindMask` for the gauge expiry. No new package -- the exporter
+# above it brings it along anyway; one edge comes along.
+metrics-util = "0.20"
+# `hyper` lies in the tree anyway over `tonic` -- the endpoint costs no new crates
+# (ADR-0023).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { workspace = true, features = ["rt", "net", "macros", "time"] }
+# What a failure at accepting costs is decided by one place in the tree
+# (`tg_syscall::accept`) -- the distinction demands `errno`, and `EMFILE` has no name
+# in `io::ErrorKind` on `stable`. The direction is right: `tg-syscall` is a leaf, and
+# its three crates lie in the tree anyway.
+tg-syscall = { path = "../tg-syscall" }
+tracing-opentelemetry = "0.31"
+opentelemetry = "0.30"
+opentelemetry_sdk = { version = "0.30", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", features = ["grpc-tonic"] }
+
+[dev-dependencies]
+# `rt-multi-thread` only for the tests: the endpoint itself runs on its caller's
+# runtime. A test that calls `curl` blocks its thread -- on a single-thread runtime
+# that would be the same one on which the endpoint accepts.
+# `test-util` gives the paused clock (`start_paused`): the observer's backoff amounts
+# to one second (ADR-0116), and a test that really waits it out is one somebody comments
+# out eventually. The same rationale as in `tests/dst`.
+tokio = { workspace = true, features = [
+  "rt-multi-thread",
+  "macros",
+  "time",
+  "test-util",
+] }
+# The observer from `probes::supervise` sets a gauge; what is checked is its **value**,
+# not the line's presence. `metrics-util` lies in the tree anyway over the dev path of
+# `tg-proxy` and `tg-runtime` (ADR-0023).
+metrics-util = { version = "0.20", features = ["debugging"] }

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:enumeration on DomainLevel: "room" is no level of the hierarchy from
+  ADR-0011.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1"/>
+    <placement>
+      <domain level="room" value="h1"/>
+    </placement>
+  </workload>
+</workloads>

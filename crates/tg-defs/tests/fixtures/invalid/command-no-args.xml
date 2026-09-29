@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="worker" kind="job">
+    <image reference="registry.example.com/busybox:1"/>
+    <command/>
+  </workload>
+</workloads>

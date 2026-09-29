@@ -1,0 +1,42 @@
+[package]
+name = "tg-store"
+description = "The projection of the desired state as a read model."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# ADR-0030: no database. The view lies in a BTreeMap, the difficult graph questions
+# are answered by tg-model. If persistence should ever be needed: redb (3 crates) --
+# no home-made storage layer.
+[dependencies]
+# The shared JSON codec of the internal paths (PLAN: "a small, shared crate is
+# missing here"). It lies **beneath** this crate.
+tg-wire = { path = "../tg-wire" }
+# ADR-0040: a node's slice goes over the stream as JSON. The `serde_json` for that
+# has stood in `tg-wire` since the shared codec -- here only the annotation of the
+# types remains.
+serde = { workspace = true }
+# ADR-0040: the stream control plane -> node. `tonic` stands here and not in `tgd`
+# because both sides need the same types and the same codec -- and because ADR-0030
+# expressly describes the projection with "watches over gRPC streams". So it is this
+# crate's intended task.
+tonic = { workspace = true }
+http = "1"
+futures-util = { version = "0.3", default-features = false }
+tg-defs = { path = "../tg-defs" }
+# ADR-0049: a node's report carries its reported capacity, and that is a `Resources`
+# -- the same generic map as in the command set (ADR-0034). A second shape for the same
+# fact would be two opportunities to let it diverge.
+tg-model = { path = "../tg-model" }
+# ADR-0095: a secret's sealed value travels in the slice (ADR-0016). **Zero new
+# packages** -- `tg-identity` lies in the tree anyway over `tgd`.
+tg-identity = { path = "../tg-identity" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

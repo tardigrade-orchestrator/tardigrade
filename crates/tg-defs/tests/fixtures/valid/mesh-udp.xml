@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The second transport per ADR-0142. `@udp` is optional, and its absence is a
+  statement: `mixed` accepts datagrams, `tcp-only` does not — for that one
+  ADR-0074 applies unchanged.
+
+  `mixed` carries the same number on both transports, and that is the normal
+  case: TCP and UDP are separate port spaces.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="mixed" kind="service">
+    <image reference="registry.example.com/mixed:1.0"/>
+    <mesh port="8080" udp="8080"/>
+  </workload>
+
+  <workload name="separate" kind="service">
+    <image reference="registry.example.com/separate:1.0"/>
+    <mesh port="8443" udp="9000"/>
+  </workload>
+
+  <workload name="tcp-only" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <mesh port="8443"/>
+  </workload>
+</workloads>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:maxInclusive=64 on Replicas. The upper bound is the counter-check to the
+  lower one in `placement-replicas-zero.xml`: a number nobody meant shall fail
+  at ingest and not occupy the planner.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1"/>
+    <placement replicas="65"/>
+  </workload>
+</workloads>

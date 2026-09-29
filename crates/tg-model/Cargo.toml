@@ -1,0 +1,27 @@
+[package]
+name = "tg-model"
+description = "The domain model: workloads, the dependency graph, desired/actual, the autonomy rules."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tg-defs = { path = "../tg-defs" }
+# ADR-0012/0039: the address plan computes with networks. `ipnet` already lay in the
+# tree, so no new package in the lock. Here once stood "lies over `tg-net`" -- that
+# pointed in a circle: since ADR-0069 `tg-net` hangs on *this* crate.
+ipnet = "2"
+
+# Topology and resources travel along in the Raft log (ADR-0004): they are domain
+# types, but their encoding is part of the audit substrate (ADR-0020).
+serde = { workspace = true }
+# ADR-0137: `AuditEvent` carries the command in the log's wire form (ADR-0020) -- a
+# `serde_json::Value`, so that a verifier sees byte for byte the same as in the log.
+# `serde_json` lies in the tree anyway.
+serde_json = { workspace = true }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The `kind` becomes the resource name `device:<kind>` and thereby travels into
+  consensus (ADR-0143, determination 5). That is why the facet DeviceKind is as
+  narrow as the reader in `tg-runtime::cdi`: `vendor.tld/class`, and the vendor
+  part carries a dot.
+
+  Without this check a file on **one** node would determine what a key in the
+  log is called.
+
+  The counter-check is `valid/devices.xml`; here **one** thing differs --
+  `nvidia` instead of `nvidia.com`.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="inference" kind="service">
+    <image reference="registry.example.com/inference:1.0"/>
+    <devices>
+      <device kind="nvidia/gpu" count="1"/>
+    </devices>
+  </workload>
+</workloads>

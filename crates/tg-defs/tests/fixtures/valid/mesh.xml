@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mesh opt-in per ADR-0025. The element is the opt-in; `api` participates,
+  `batch` does not. Whoever does not participate gets no identity and talks to
+  nobody in the mesh — that is deny-by-default at the coarse level.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <mesh port="8443"/>
+  </workload>
+
+  <workload name="batch" kind="job">
+    <image reference="registry.example.com/batch:1.0"/>
+  </workload>
+</workloads>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DeviceCount begins at one. Demanding zero devices is no setting (ADR-0143):
+  the planner would book nothing, the node would assign nothing, and the line
+  would stand there as if it achieved something -- the finding from ADR-0124 in
+  a new shape.
+
+  Whoever wants no device leaves `<devices>` out.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="inference" kind="service">
+    <image reference="registry.example.com/inference:1.0"/>
+    <devices>
+      <device kind="nvidia.com/gpu" count="0"/>
+    </devices>
+  </workload>
+</workloads>

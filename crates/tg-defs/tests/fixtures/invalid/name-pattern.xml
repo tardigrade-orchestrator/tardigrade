@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:pattern on WorkloadName: capital letters and the underscore are excluded.
+  The name becomes a DNS label (ADR-0013) and a part of the SPIFFE id
+  (ADR-0036) -- neither tolerates either.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="Web_Server" kind="service">
+    <image reference="registry.example.com/api:1"/>
+  </workload>
+</workloads>

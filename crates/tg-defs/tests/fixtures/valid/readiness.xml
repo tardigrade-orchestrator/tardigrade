@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The readiness probe from ADR-0080. Two cases in one document, and their
+  difference is the statement of determination 2:
+
+  - `api` declares a probe **and** mesh. As a rule it is the same number, and it
+    nevertheless stands twice: readiness and mesh membership are two decisions.
+  - `batch` declares a probe **without** mesh. A workload that is not in the
+    mesh may have a readiness — it acts on resolution (ADR-0013), not on the
+    data plane.
+  - `http` declares a **path** (ADR-0102): then the probe is a GET and ready
+    means 2xx. Without a path it stays a TCP connect, and that is the right
+    probe for a workload that speaks TLS on its port.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <mesh port="8080"/>
+    <readiness port="8080"/>
+  </workload>
+  <workload name="batch" kind="service">
+    <image reference="registry.example.com/batch:1.0"/>
+    <readiness port="9100"/>
+  </workload>
+  <workload name="http" kind="service">
+    <image reference="registry.example.com/http:1.0"/>
+    <readiness port="8080" path="/healthz?verbose=0"/>
+  </workload>
+</workloads>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The order in `xs:sequence` is binding: <readiness> stands **after** <mesh>
+  (ADR-0080). The other way round the document is refused.
+
+  The fixture stands there so that the order is a checked assurance and not an
+  observation: it is part of the format an operator types, and a document that
+  fails on it shall do so with a message that names the reason.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <readiness port="8080"/>
+    <mesh port="8080"/>
+  </workload>
+</workloads>

@@ -1,0 +1,53 @@
+[package]
+name = "xtask"
+description = "Dev tasks: the lint/supply-chain gates, later the XSD codegen and the DST runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# xtask is a pure dev tool (publish = false, contained in no delivery binary). The
+# codegen toolchain therefore lives here and not in the product crates (ADR-0008,
+# ADR-0023).
+[dependencies]
+# The report per ADR-0020 arises here, its format lies in the test rig. `xtask` is no
+# delivery binary (ADR-0023) -- the dependency does not leave the development path.
+tg-dst = { path = "../tests/dst" }
+xsd-parser = "1.5.2"
+# ADR-0035: protobuf codegen for the SPIFFE workload API. `protox` is the compiler in
+# pure Rust -- the reason why no `protoc` is necessary and why the objection from phase
+# 5c does not bite at this place. Both lie here and not in the product crates: the
+# product is checked in, the delivery's build never sees these tools (ADR-0023).
+protox = "0.9"
+tonic-prost-build = "0.14"
+# `cargo xtask identity` produces dev material for a local run. It lies here and not
+# in a delivery binary: a tool that produces CAs does not belong in the same program
+# that trusts them.
+rcgen = { workspace = true }
+# `cargo xtask image` builds the sidecar image into the local content store
+# (ADR-0059, ADR-0019: if it lies locally, it is taken locally). All three already lay
+# in the tree; `tar` is brought along by `tg-runtime` anyway.
+tar = "0.4"
+# `cargo xtask threshold` runs the DKG for a local run (ADR-0097, determination 5).
+# Here too ADR-0023 applies: the dependency does not leave the development path -- and
+# a tool that sees all five shares does not belong in the same program that trusts the
+# group.
+# ADR-0134: the bill of materials is written from `cargo metadata`, not produced by a
+# second tool. `serde_json` lies in the tree anyway.
+serde_json = { workspace = true }
+# ADR-0138: the digest a second run must reproduce. `ring` is this tree's hash library
+# (ADR-0023: one per task) and lies in it anyway -- xtask is no delivery binary.
+ring = "0.17"
+tg-identity = { path = "../crates/tg-identity" }
+tg-model = { path = "../crates/tg-model" }
+tg-runtime = { path = "../crates/tg-runtime" }
+time = { workspace = true }
+
+[dev-dependencies]
+# ADR-0134: the witnesses read the checked-in bill of materials.
+serde_json = { workspace = true }

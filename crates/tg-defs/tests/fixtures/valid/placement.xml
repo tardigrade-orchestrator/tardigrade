@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <!-- Without <placement>: one instance, anti-affinity at rack level. -->
+  <workload name="plain" kind="service">
+    <image reference="registry.example.com/plain:1"/>
+  </workload>
+  <!-- With all settings. -->
+  <workload name="spread" kind="service">
+    <image reference="registry.example.com/spread:1"/>
+    <placement replicas="3" spread="hall">
+      <domain level="site" value="fra"/>
+      <domain level="rack" value="r1"/>
+      <domain level="rack" value="r2"/>
+    </placement>
+  </workload>
+  <!-- Node pinning per ADR-0027. -->
+  <workload name="pinned" kind="service" class="single-writer">
+    <image reference="registry.example.com/pinned:1"/>
+    <placement>
+      <pin node="node-7"/>
+    </placement>
+  </workload>
+</workloads>

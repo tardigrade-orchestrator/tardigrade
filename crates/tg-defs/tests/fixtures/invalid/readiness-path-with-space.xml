@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A space in the probe path (ProbePath, ADR-0102).
+
+  The path goes into an HTTP request line — `GET <path> HTTP/1.1`. A space in it
+  ends the path and turns the rest into a setting of its own:
+  `GET /a HTTP/1.1 b HTTP/1.1` is request splitting, and the server reads
+  something other than what the operator wrote.
+
+  The pattern therefore permits no whitespace.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <readiness port="8080" path="/a b"/>
+  </workload>
+</workloads>

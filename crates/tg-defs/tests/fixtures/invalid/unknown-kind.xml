@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:enumeration on Kind: "daemon" is no value of this enumeration.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="daemon">
+    <image reference="registry.example.com/api:1"/>
+  </workload>
+</workloads>

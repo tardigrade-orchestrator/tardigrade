@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:minLength on Arg: an empty argument is none. It would be an empty string in
+  the invocation line, and what a program does with it is its own business.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="worker" kind="job">
+    <image reference="registry.example.com/busybox:1"/>
+    <command><arg></arg></command>
+  </workload>
+</workloads>

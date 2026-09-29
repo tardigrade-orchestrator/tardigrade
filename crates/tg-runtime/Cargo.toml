@@ -1,0 +1,70 @@
+[package]
+name = "tg-runtime"
+description = "The OCI runtime connection (youki/crun), the content store, the image puller."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# ADR-0015: the reconcile's messages go to the binaries' subscriber, not to stderr.
+# `tracing` lies in the tree anyway over tg-telemetry.
+tracing = "0.1"
+tg-telemetry = { path = "../tg-telemetry" }
+metrics = "0.24"
+# ADR-0027: a volume's ledger lies beside it on the disk.
+serde = { workspace = true }
+serde_json = { workspace = true }
+tg-defs = { path = "../tg-defs" }
+tg-model = { path = "../tg-model" }
+tg-syscall = { path = "../tg-syscall" }
+
+# ADR-0003: the spec types and our own Rust puller.
+oci-spec = "0.10"
+# default-features = false keeps test-registry out; rustls-tls expressly, because
+# invariant 3 forbids OpenSSL/native-tls (banned hard in deny.toml in addition).
+oci-client = { version = "0.17", default-features = false, features = ["rustls-tls"] }
+
+# ADR-0002: tokio as the runtime of the control-plane side.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time"] }
+# ADR-0129: the clearing away's grace period runs for all at once -- `join_all` needs
+# `alloc`, nothing else. The crate lies in the tree anyway (tgd, tg-agent, tg-net,
+# tg-store, tg-identity, tg-proxy); measured, it stays at 384 crates.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+sha2 = "0.10"
+# ADR-0052: the whiteout translation needs mknodat and setxattr -- both safe
+# wrappers, invariant 2 stays untouched. rustix lies in the tree.
+rustix = { version = "1", features = ["fs"] }
+tar = "0.4"
+flate2 = "1"
+zstd = "0.13"
+hex = "0.4"
+
+[dev-dependencies]
+# Catches the metrics in the test -- as in `tg-proxy`, and with the same crates: they
+# lie in the `Cargo.lock` anyway over its dev path. A hand-written recorder would be a
+# second reader for a format with one writer.
+metrics-util = { version = "0.20", features = ["debugging"] }
+tempfile = "3"
+# Catches the log lines in the test. A `Subscriber` of its own would be a second
+# reader for a format with one writer; the crate lies in the tree anyway over
+# `tg-telemetry`.
+tracing-subscriber = "0.3"
+# ADR-0052: the whiteout tests build their layers themselves, mount them as overlayfs
+# and read the set xattr back. All three crates are dependencies already -- but
+# integration tests do not see those.
+tar = "0.4"
+rustix = { version = "1", features = ["fs"] }
+tg-syscall = { path = "../tg-syscall" }
+# ADR-0012: the end-to-end proof that a container lands in the network the agent
+# prepared for it. A **dev** dependency, because the seam `network::Wiring` is there
+# for exactly that: `tg-runtime` does not hang on `tg-net`, and `tg-net` not on
+# `tg-runtime`.
+tg-net = { path = "../tg-net" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

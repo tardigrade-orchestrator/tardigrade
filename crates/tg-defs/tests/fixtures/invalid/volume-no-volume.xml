@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- <volumes> without <volume>: the maxOccurs sequence demands at least one. -->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="ledger" kind="service">
+    <image reference="registry.example.com/ledger:2.1"/>
+    <volumes/>
+  </workload>
+</workloads>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:maxInclusive on Millicores: 1024000 is a good thousand cores. Above that
+  the number is a typo, and the planner shall not book it.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1"/>
+    <resources><cpu millicores="9999999"/></resources>
+  </workload>
+</workloads>

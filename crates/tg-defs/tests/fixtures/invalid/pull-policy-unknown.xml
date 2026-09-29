@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:enumeration on PullPolicy. "latest" is no value of this enumeration — and
+  the confusion is near at hand, because `:latest` is an image tag. Whoever let
+  it through would get the default and not what stands there.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1" pullPolicy="latest"/>
+  </workload>
+</workloads>

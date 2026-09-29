@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Capital letters and a dot violate DomainLabel's facet. -->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1"/>
+    <placement>
+      <domain level="rack" value="Rack.7"/>
+    </placement>
+  </workload>
+</workloads>

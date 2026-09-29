@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Both modes from ADR-0027 in one document: a writable volume that belongs to
+  this workload exclusively, and a shared reference volume that is only read.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="ledger" kind="service" class="single-writer">
+    <image reference="registry.example.com/ledger:2.1"/>
+    <volumes>
+      <volume name="ledger-data" path="/var/lib/ledger" mode="readWrite" size="1073741824"/>
+      <volume name="reference-data" path="/opt/reference" mode="readOnly" source="registry.example.com/stamm:1"/>
+    </volumes>
+  </workload>
+</workloads>

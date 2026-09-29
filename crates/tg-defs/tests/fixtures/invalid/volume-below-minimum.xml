@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:minInclusive=8388608 on VolumeBytes. Below 8 MiB `mkfs.ext4` creates no
+  usable file system (phase 10b) — the rejection belongs at the ingest and not
+  in the privileged process that creates it.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="ledger" kind="service">
+    <image reference="registry.example.com/ledger:2.1"/>
+    <volumes>
+      <volume name="data" path="/var/lib/ledger" mode="readWrite" size="1048576"/>
+    </volumes>
+  </workload>
+</workloads>

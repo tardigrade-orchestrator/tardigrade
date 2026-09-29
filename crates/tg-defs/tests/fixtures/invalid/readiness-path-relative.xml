@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A probe path without a leading slash (ProbePath, ADR-0102).
+
+  `GET healthz HTTP/1.1` is no valid request line — an origin-form target begins
+  with '/'. Silently adding it would be a correction to an operator's setting.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <readiness port="8080" path="healthz"/>
+  </workload>
+</workloads>

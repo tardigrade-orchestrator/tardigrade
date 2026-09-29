@@ -1,0 +1,479 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Workload definition format, version v1 (ADR-0008).
+
+  The namespace is versioned: an incompatible schema change gets a new
+  namespace (…:v2), so that old definitions are not silently misinterpreted.
+
+  The supported XSD subset is documented in schema/README.md. Do not extend it
+  without a counter-check — not every XSD construct survives the codegen with
+  its facets intact.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="urn:tardigrade:workload:v1"
+           targetNamespace="urn:tardigrade:workload:v1"
+           elementFormDefault="qualified"
+           attributeFormDefault="unqualified">
+
+  <!-- ==================== Simple types (facets) ==================== -->
+
+  <!--
+    DNS-label compatible: in phase 9 the name becomes the service discovery
+    name (ADR-0013), which is why it is fixed to the narrower form already
+    here. The pattern already bounds the length at 63 characters.
+  -->
+  <xs:simpleType name="WorkloadName">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[a-z][a-z0-9-]{0,62}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="ImageReference">
+    <xs:restriction base="xs:string">
+      <xs:minLength value="1"/>
+      <xs:maxLength value="512"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="Kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="service"/>
+      <xs:enumeration value="job"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+    Workload class per ADR-0010. It answers exactly one question: may there be
+    more than one active instance cluster-wide?
+
+    Not to be confused with @kind. `kind` says *what* the workload is (a
+    long-runner or a one-off run); `class` says *how often* it may be active at
+    the same time. A workload can be kind="service" and class="single-writer".
+
+    - replicated    stateless/idempotent, no single-writer constraint. Full
+                    static stability: carries on running on both sides of a
+                    partition, no fencing needed. This is the default when the
+                    attribute is absent.
+    - single-writer at most one active instance cluster-wide, for workloads
+                    with side effects. Governance via a quorum-backed
+                    active-role lease with a monotonically rising fencing epoch
+                    (ADR-0010, from phase 5).
+
+    Opt-in on purpose: the safe default is the one that may carry on running
+    without quorum.
+  -->
+  <xs:simpleType name="WorkloadClass">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="replicated"/>
+      <xs:enumeration value="single-writer"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="PullPolicy">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="always"/>
+      <xs:enumeration value="if-not-present"/>
+      <xs:enumeration value="never"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 1000 millicores = 1 core. The upper bound is deliberately generous. -->
+  <xs:simpleType name="Millicores">
+    <xs:restriction base="xs:unsignedInt">
+      <xs:minInclusive value="1"/>
+      <xs:maxInclusive value="1024000"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Lower bound 1 MiB: below that no realistic container starts. -->
+  <xs:simpleType name="MemoryBytes">
+    <xs:restriction base="xs:unsignedLong">
+      <xs:minInclusive value="1048576"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+    A TCP port. Zero is excluded: in the kernel 0 means "pick one yourself",
+    and that is not a setting that may stand in a definition.
+  -->
+  <xs:simpleType name="Port">
+    <xs:restriction base="xs:unsignedInt">
+      <xs:minInclusive value="1"/>
+      <xs:maxInclusive value="65535"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="Arg">
+    <xs:restriction base="xs:string">
+      <xs:minLength value="1"/>
+      <xs:maxLength value="4096"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ==================== Start command ==================== -->
+
+  <!--
+    Overrides the image's entrypoint and cmd. If the element is absent, the
+    image's setting applies (ADR-0003).
+
+    Deliberately a list of <arg> and not a string: a command line that is split
+    only at run time is an injection surface. There is no shell here that
+    interprets anything - every argument stands for itself and goes unchanged
+    into the OCI spec's process.args.
+  -->
+  <xs:complexType name="Command">
+    <xs:sequence>
+      <xs:element name="arg" type="Arg" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- ==================== Dependencies (ADR-0009) ==================== -->
+
+  <xs:complexType name="DependencyRef">
+    <xs:attribute name="ref" type="WorkloadName" use="required"/>
+  </xs:complexType>
+
+  <!--
+    Two orthogonal axes, deliberately not mixed (ADR-0009):
+      ordering    - after, before        (order only)
+      requirement - requires, wants,
+                    bindsTo, conflicts   (failure/lifecycle coupling)
+    A requirement implies NO ordering. The linter for that comes in phase 3.
+  -->
+  <xs:complexType name="Dependencies">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="after" type="DependencyRef"/>
+      <xs:element name="before" type="DependencyRef"/>
+      <xs:element name="requires" type="DependencyRef"/>
+      <xs:element name="wants" type="DependencyRef"/>
+      <xs:element name="bindsTo" type="DependencyRef"/>
+      <xs:element name="conflicts" type="DependencyRef"/>
+    </xs:choice>
+  </xs:complexType>
+
+  <!-- ==================== Placement (ADR-0011) ==================== -->
+
+  <!--
+    The levels of the failure-domain hierarchy from ADR-0011:
+    site -> hall -> rack -> host. The host is the fourth level and needs no
+    value - that is the node name itself, and for that there is <pin>.
+  -->
+  <xs:simpleType name="DomainLevel">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="site"/>
+      <xs:enumeration value="hall"/>
+      <xs:enumeration value="rack"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+    The label of a failure domain. The same form as a workload name: it ends
+    up in comparisons, messages and in the audit trail, and a label with spaces
+    or special characters would be a trap there.
+  -->
+  <xs:simpleType name="DomainLabel">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[a-z0-9][a-z0-9-]{0,62}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+    How many instances of a workload are placed. The upper bound is
+    deliberately low: more instances than racks in a data centre are not
+    placeable with hard anti-affinity anyway, and a number that can never be
+    satisfied belongs refused at ingest and not only by the scheduler.
+  -->
+  <xs:simpleType name="Replicas">
+    <xs:restriction base="xs:unsignedInt">
+      <xs:minInclusive value="1"/>
+      <xs:maxInclusive value="64"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+    A constraint onto a failure domain. Several settings of the same level are
+    a selection list (OR), settings of different levels apply together (AND) -
+    the rule stands in tg-model, because the XSD cannot express it.
+  -->
+  <xs:complexType name="DomainConstraint">
+    <xs:attribute name="level" type="DomainLevel" use="required"/>
+    <xs:attribute name="value" type="DomainLabel" use="required"/>
+  </xs:complexType>
+
+  <!--
+    Nailing down to exactly one node (ADR-0027): a workload with a writable
+    local volume is not movable. HA then runs via a replica with its own
+    volume, never via volume migration.
+  -->
+  <xs:complexType name="NodePin">
+    <xs:attribute name="node" type="DomainLabel" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="Placement">
+    <xs:sequence>
+      <xs:element name="domain" type="DomainConstraint" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="pin" type="NodePin" minOccurs="0"/>
+    </xs:sequence>
+    <!--
+      Without xs:default, as with class: the codegen yields Option<T>, the
+      defaults (1 instance, anti-affinity at rack level) are set by the domain
+      layer. See schema/README.md.
+    -->
+    <xs:attribute name="replicas" type="Replicas"/>
+    <xs:attribute name="spread" type="DomainLevel"/>
+  </xs:complexType>
+
+  <!-- ==================== Mesh (ADR-0025) ==================== -->
+
+  <!--
+    The mesh membership from ADR-0025: "opt-in per workload in the definition.
+    No mesh flag -> no identity, no participation."
+
+    The element itself is the opt-in - there is no additional enabled
+    attribute. A switch one can set to "false" would be a second way of saying
+    the same thing, and two ways mean sooner or later that they contradict each
+    other.
+
+    @port is the only setting the sidecar needs: on which port in the container
+    the workload listens. The sidecar passes through to it after terminating
+    mTLS (ADR-0007). Without this setting it would have to guess.
+
+    What does NOT stand here is "who may talk with whom". Those are may_talk
+    edges and thereby a relation between two workloads - it does not belong in
+    the definition of a single one (ADR-0025) but in the graph. A definition
+    that brought its own permissions along would be one that clears itself.
+  -->
+  <!--
+    A volume (ADR-0027). Two lines of schema, three rules of domain:
+
+    - writable means **exclusive** and per instance. Two workloads must not
+      both write the same name.
+    - shared means **read-only**. A volume that more than one workload names
+      must be readOnly everywhere.
+    - a workload with a writable volume is node-pinned.
+
+    None of them is a structural property of a single document — they are
+    statements about the set of all workloads and therefore belong, after
+    ADR-0009's example, in `tg-model`, not in the schema (see README).
+  -->
+  <xs:simpleType name="VolumeMode">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="readWrite"/>
+      <xs:enumeration value="readOnly"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+    The mount point in the container. Absolute, without empty components, and
+    **without** a component consisting only of dots - '.' and '..' point out of
+    the container, and a mount point that does so is the most dangerous form of
+    a typo.
+
+    Written out instead of short: XSD knows no negative lookahead. A component
+    is therefore "arbitrarily many permitted characters, among them at least
+    one that is not a dot". That permits '.hidden' and 'a..b' and excludes '.',
+    '..' and '...'.
+  -->
+  <xs:simpleType name="MountPath">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="(/[a-zA-Z0-9._-]*[a-zA-Z0-9_-][a-zA-Z0-9._-]*)+"/>
+      <xs:maxLength value="4096"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="Volume">
+    <xs:attribute name="name" type="WorkloadName" use="required"/>
+    <xs:attribute name="path" type="MountPath" use="required"/>
+    <xs:attribute name="mode" type="VolumeMode" use="required"/>
+    <!--
+      Where the content comes from - an OCI reference (ADR-0027: shared RO
+      reference data is distributed content-addressed, like the image store
+      from ADR-0003).
+
+      Only with readOnly, and mandatory there. That the two belong together is
+      a statement about a document and could not be expressed in the schema
+      (XSD 1.0 knows no conditional attributes); it therefore stands in
+      `tg-model::storage`, like the other volume rules.
+    -->
+    <xs:attribute name="source" type="ImageReference"/>
+    <!--
+      The size in bytes - only with readWrite, and mandatory there. A shared
+      volume has the size of its content; a setting beside it would be a second
+      truth.
+
+      Lower bound 8 MiB: below that `mkfs.ext4` creates no usable file system,
+      and the refusal here is more readable than its own.
+    -->
+    <xs:attribute name="size" type="VolumeBytes"/>
+  </xs:complexType>
+
+  <xs:simpleType name="VolumeBytes">
+    <xs:restriction base="xs:unsignedLong">
+      <xs:minInclusive value="8388608"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="Volumes">
+    <xs:sequence>
+      <xs:element name="volume" type="Volume" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- ==================== Devices (ADR-0143, builds ADR-0028) ==================== -->
+
+  <!--
+    The CDI `kind`, `vendor.tld/class`. It becomes the resource name
+    `device:<kind>` and thereby travels into consensus (ADR-0143 determination
+    5) - which is why the pattern here is as narrow as the reader in
+    `tg-runtime::cdi`.
+
+    NOT a concrete device name: which of the two GPUs an instance gets is a
+    node detail, and ADR-0028 expressly leaves the partitioning below the CDI
+    line.
+  -->
+  <xs:simpleType name="DeviceKind">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[a-zA-Z0-9._-]*\.[a-zA-Z0-9._-]*/[a-zA-Z0-9._-]+"/>
+      <xs:maxLength value="253"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="DeviceCount">
+    <xs:restriction base="xs:unsignedInt">
+      <xs:minInclusive value="1"/>
+      <xs:maxInclusive value="64"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="Device">
+    <xs:attribute name="kind" type="DeviceKind" use="required"/>
+    <xs:attribute name="count" type="DeviceCount" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="Devices">
+    <xs:sequence>
+      <xs:element name="device" type="Device" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!--
+    @udp is the second transport (ADR-0142) and expressly optional: without it
+    ADR-0074 applies unchanged, and UDP between two workloads is discarded.
+
+    An attribute and not a second element, because it is the same statement
+    ("this is how I am reachable in the mesh"), only for the other transport.
+    And exactly ONE, for the same reason as with @port (ADR-0141,
+    determination 2): two ports behind one identity would mean that one edge
+    permits two things that are dangerous in different ways.
+
+    The number may be the same as @port - TCP and UDP are separate port spaces,
+    and a workload that listens on 8080 in both is the normal case.
+  -->
+  <xs:complexType name="Mesh">
+    <xs:attribute name="port" type="Port" use="required"/>
+    <xs:attribute name="udp" type="Port" use="optional"/>
+  </xs:complexType>
+
+  <!-- ==================== Readiness (ADR-0080) ==================== -->
+
+  <!--
+    The readiness probe from ADR-0015 ("probes: liveness/readiness/health per
+    workload"). As with <mesh> the element itself is the opt-in, and @port is
+    the only setting - there is no period and no threshold.
+
+    No period, because the reconcile has a cadence and a second one would be a
+    second source for the same question. No threshold, because it would demand
+    a counter per instance - remembered state that a restart loses, that is,
+    edge-driven and against ADR-0010. The outcome of a pass IS the state
+    (ADR-0080, determination 4).
+
+    The port is the one on which the workload listens - the same notion as in
+    <mesh>, and as a rule the same number. Named separately, because readiness
+    and mesh membership are two decisions: a workload without a mesh may have a
+    probe, and a mesh member need not have one.
+
+    What does NOT stand here is an effect. A failed probe takes the instance
+    out of the resolution (ADR-0013) and nothing else - no restart (ADR-0080,
+    determination 7).
+  -->
+
+  <!--
+    An HTTP path for the readiness probe (ADR-0102).
+
+    Begins with '/', permits query characters. No '..' and no whitespace: the
+    path goes into an HTTP request line, and a space in it would be a second
+    request (request splitting). The same caution as with MountPath, for a
+    different reason.
+  -->
+  <xs:simpleType name="ProbePath">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="(/[a-zA-Z0-9._~%!$&amp;'()*+,;=:@-]*)+(\?[a-zA-Z0-9._~%!$&amp;'()*+,;=:@/-]*)?"/>
+      <xs:maxLength value="512"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="Readiness">
+    <xs:attribute name="port" type="Port" use="required"/>
+    <!--
+      Without 'path' the probe is a TCP connect (ADR-0080); with 'path' an
+      HTTP GET, and ready means 2xx (ADR-0102). Optional, and that is the right
+      probe for a workload that speaks TLS on its port.
+    -->
+    <xs:attribute name="path" type="ProbePath" use="optional"/>
+  </xs:complexType>
+
+  <!-- ==================== Resources (ADR-0003) ==================== -->
+
+  <xs:complexType name="Cpu">
+    <xs:attribute name="millicores" type="Millicores" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="Memory">
+    <xs:attribute name="bytes" type="MemoryBytes" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="Resources">
+    <xs:sequence>
+      <xs:element name="cpu" type="Cpu" minOccurs="0"/>
+      <xs:element name="memory" type="Memory" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- ==================== Workload ==================== -->
+
+  <xs:complexType name="Image">
+    <xs:attribute name="reference" type="ImageReference" use="required"/>
+    <xs:attribute name="pullPolicy" type="PullPolicy"/>
+  </xs:complexType>
+
+  <xs:complexType name="Workload">
+    <xs:sequence>
+      <xs:element name="image" type="Image"/>
+      <xs:element name="command" type="Command" minOccurs="0"/>
+      <xs:element name="resources" type="Resources" minOccurs="0"/>
+      <xs:element name="mesh" type="Mesh" minOccurs="0"/>
+      <xs:element name="readiness" type="Readiness" minOccurs="0"/>
+      <xs:element name="volumes" type="Volumes" minOccurs="0"/>
+      <xs:element name="devices" type="Devices" minOccurs="0"/>
+      <xs:element name="placement" type="Placement" minOccurs="0"/>
+      <xs:element name="dependencies" type="Dependencies" minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="WorkloadName" use="required"/>
+    <xs:attribute name="kind" type="Kind" use="required"/>
+    <!--
+      Without xs:default: the codegen yields Option<T>, the default
+      (replicated) is set by the domain layer. That way it stands in one place
+      instead of twice, in schema and code - see schema/README.md.
+    -->
+    <xs:attribute name="class" type="WorkloadClass"/>
+  </xs:complexType>
+
+  <xs:complexType name="WorkloadSet">
+    <xs:sequence>
+      <xs:element name="workload" type="Workload" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:element name="workloads" type="WorkloadSet"/>
+
+</xs:schema>

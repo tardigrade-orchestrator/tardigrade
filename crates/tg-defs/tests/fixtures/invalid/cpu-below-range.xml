@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:minInclusive on Millicores: zero millicores is no setting.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1"/>
+    <resources><cpu millicores="0"/></resources>
+  </workload>
+</workloads>

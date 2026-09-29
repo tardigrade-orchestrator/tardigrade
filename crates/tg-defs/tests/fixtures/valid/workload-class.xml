@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="ledger" kind="service" class="single-writer">
+    <image reference="example.com/ledger:1"/>
+  </workload>
+  <workload name="frontend" kind="service" class="replicated">
+    <image reference="example.com/frontend:1"/>
+  </workload>
+  <workload name="unspecified" kind="service">
+    <image reference="example.com/plain:1"/>
+  </workload>
+</workloads>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="db" kind="service">
+    <image reference="registry.example.com/postgres:16" pullPolicy="if-not-present"/>
+    <resources>
+      <cpu millicores="2000"/>
+      <memory bytes="4294967296"/>
+    </resources>
+  </workload>
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.4.2" pullPolicy="always"/>
+    <resources>
+      <cpu millicores="500"/>
+      <memory bytes="536870912"/>
+    </resources>
+    <dependencies>
+      <after ref="db"/>
+      <requires ref="db"/>
+      <wants ref="cache"/>
+      <bindsTo ref="api-sidecar"/>
+      <before ref="batch"/>
+      <conflicts ref="api-legacy"/>
+    </dependencies>
+  </workload>
+</workloads>

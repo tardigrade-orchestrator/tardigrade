@@ -1,0 +1,27 @@
+/target/
+**/*.rs.bk
+
+# IDE
+/.idea/
+
+# Build artifacts from xtask (SBOM, DST reports)
+/artifacts/
+
+# Key material and certificates — never in the tree.
+#
+# The rule is broad, and it means it: the risk is not the files that lie here
+# today — those one knows —, but the next one somebody drops while trying
+# something out. A private key in the repository is an incident even when it
+# was "only test stuff": the history does not forget, and cutting it out
+# afterwards means pulling every clone anew.
+#
+# Should a certificate ever really belong checked in — a trust anchor as a
+# test fixture, say —, that is a deliberate act: `git add -f <file>`. Exactly
+# that deliberateness is the rule's purpose.
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python bytecode of the dossier generator (plans/dossier.py).
+__pycache__/

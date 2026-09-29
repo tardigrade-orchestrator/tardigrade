@@ -1,0 +1,76 @@
+[package]
+name = "tg-net"
+description = "The userspace CNI: veth and nftables, no eBPF."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# So that the forwarder names its failures: an upstream that does not answer would
+# otherwise leave the asker standing in silence -- and the cause lies with the
+# operator, not with the container.
+tracing = "0.1"
+# CIDR arithmetic. Lies in the tree anyway over `hyper-util` (oci-client), so it
+# costs no additional crate -- and computing prefixes by hand is exactly the sort of
+# arithmetic one gets wrong once and never notices.
+ipnet = "2"
+# The address ledger lies on the agent's disk (ADR-0019).
+serde = { workspace = true }
+# ADR-0038: the rule set goes to the `nft` program as JSON. This crate is the
+# maintained model of the schema from `libnftables-json(5)`; it links nothing, it only
+# serializes.
+nftables = "0.6.3"
+serde_json = { workspace = true }
+# ADR-0012: netlink for the kernel path. Pure Rust, MIT.
+rtnetlink = { version = "0.23", features = ["tokio_socket"] }
+futures-util = { version = "0.3", default-features = false }
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros"] }
+# ADR-0013: the wire format. A parser and serializer, no resolver and no server --
+# the answers come from `discovery` (phase 9a). Costs **one** crate: `bitflags` lies in
+# the tree anyway.
+simple-dns = "0.12"
+# Namespaces and the bpf(2) proof lie where `unsafe` is permitted.
+tg-syscall = { path = "../tg-syscall" }
+# ADR-0012/0039: the address plan (ordinal -> subnet).
+#
+# It lay here first, and the plan recorded as a property that `tg-net` hangs neither on
+# `tg-store` nor on `tg-model`. Half of that still applies: `tg-store` has stayed a dev
+# dependency. `tg-model` is no longer one, and the reason is a measured error -- the
+# consensus assigned ordinals without knowing the capacity, because the computation
+# stood only here and it must not link this crate (netlink, nftables). A second copy
+# would be the source of error this project has measured several times.
+tg-model = { path = "../tg-model" }
+metrics = "0.24"
+tg-telemetry = { path = "../tg-telemetry" }
+netlink-packet-wireguard = "0.5"
+genetlink = "0.3"
+# ADR-0039: X25519 for the underlay. `curve25519-dalek` lies in the tree anyway since
+# ADR-0014 -- it costs one crate.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# Keys in the spelling WireGuard and the log use. Lies in the tree already over
+# `oci-client`.
+base64 = "0.22"
+rand_core = { workspace = true }
+netlink-packet-core = "0.9.0"
+netlink-packet-generic = "0.5.0"
+
+[dev-dependencies]
+# Only for the proof that `tg-net` and the projection fit together **without**
+# `tg-net` hanging on it (tests/static_stability.rs).
+tg-defs = { path = "../tg-defs" }
+tg-store = { path = "../tg-store" }
+metrics-util = { version = "0.20", features = ["debugging"] }
+# Only for `tests/resolver_exhaustion.rs`: lower the descriptor limit (`setrlimit`)
+# and lay out a socket **before** the exhaustion. Lies in the tree anyway over
+# `tg-syscall`.
+rustix = { version = "1", features = ["process", "net"] }
+# `rt-multi-thread` for `tests/resolver_exhaustion.rs`: on a single-thread runtime a
+# spinning accept loop would starve the test itself -- it would hang instead of failing
+# (the finding from 11b).
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

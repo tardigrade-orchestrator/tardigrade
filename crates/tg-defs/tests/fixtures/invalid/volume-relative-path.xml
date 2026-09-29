@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xs:pattern on MountPath: the mount point is absolute. A relative path would
+  otherwise stand out only at mount time — and then in a privileged process.
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="ledger" kind="service">
+    <image reference="registry.example.com/ledger:2.1"/>
+    <volumes>
+      <volume name="data" path="var/lib/ledger" mode="readWrite" size="8388608"/>
+    </volumes>
+  </workload>
+</workloads>

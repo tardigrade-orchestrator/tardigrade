@@ -1,0 +1,33 @@
+[package]
+name = "tg-admin"
+description = "The admin protocol and its client (ADR-0044, ADR-0134)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# ADR-0134: the command set lies beneath the consensus so that a client can
+# formulate it without linking `openraft` and `redb`.
+tg-model = { path = "../tg-model" }
+# The codec of the internal paths (ADR-0040, tg-wire).
+tg-wire = { path = "../tg-wire" }
+# `PeerCredentials` for the access rule at the Unix socket (ADR-0044).
+tg-identity = { path = "../tg-identity" }
+serde = { workspace = true }
+tonic = { workspace = true, features = ["codegen", "transport"] }
+http = "1"
+rustls-pki-types = "1"
+tokio = { workspace = true, features = ["net"] }
+tower = "0.5"
+# The operator port demands mTLS (ADR-0103): the client reads its key and builds the
+# channel. Both lie in the tree anyway.
+rcgen = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+hyper-util = { version = "0.1", features = ["tokio"] }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A workload's device requirement (ADR-0143, builds ADR-0028).
+
+  `@kind` is the CDI `kind` and **no concrete device name**: which of the two
+  GPUs an instance gets is a node detail, and ADR-0028 expressly leaves the
+  partitioning below the CDI line.
+
+  Two entries, because a workload may demand an accelerator **and** something
+  else -- the seam is not GPU-specific (ADR-0028: FPGA, SmartNIC, prospectively
+  an HSM for ADR-0014).
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="inference" kind="service">
+    <image reference="registry.example.com/inference:1.0"/>
+    <devices>
+      <device kind="nvidia.com/gpu" count="1"/>
+      <device kind="example.com/fpga" count="2"/>
+    </devices>
+  </workload>
+</workloads>

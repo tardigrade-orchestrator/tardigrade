@@ -1,0 +1,91 @@
+[package]
+name = "tgd"
+description = "Control-plane binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "tgd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tgd"
+path = "src/main.rs"
+
+[dependencies]
+tg-consensus = { path = "../tg-consensus" }
+# ADR-0087's neighbour: the shared codec -- and since the measurement of the
+# snapshot inflation also the one place at which the message limit stands
+# (`tg_wire::server`/`client`).
+tg-wire = { path = "../tg-wire" }
+tg-telemetry = { path = "../tg-telemetry" }
+# ADR-0137: the one-shot mode writes the segment as JSON lines.
+serde_json = { workspace = true }
+tg-admin = { path = "../tg-admin" }
+tg-defs = { path = "../tg-defs" }
+tg-store = { path = "../tg-store" }
+# The SPIFFE server (ADR-0006/0037): tgd issues node SVIDs and agent
+# intermediates. Until the wiring nobody did that.
+tg-model = { path = "../tg-model" }
+tg-identity = { path = "../tg-identity" }
+# What a failure at the accept costs is decided by one place in the tree
+# (`tg_syscall::accept`). Measured: `tonic` does not catch `EMFILE`, so our own
+# accept stream must do it before `tonic` sees it.
+tg-syscall = { path = "../tg-syscall" }
+rand_core = { workspace = true }
+ring = "0.17"
+rcgen = { workspace = true }
+# ADR-0048: the lints on the wanted set arise in the admin service, and the graph
+# that forms them lies in tg-model (ADR-0009).
+metrics = "0.24"
+openraft = { workspace = true }
+serde = { workspace = true }
+# `tls-ring`: not for tonic's own TLS configuration -- we do not use that
+# (ADR-0043, determination 5) --, but for `Connected for TlsStream`. Without the
+# feature `serve_with_incoming` takes no terminated stream.
+tonic = { workspace = true, features = ["tls-ring"] }
+bytes = { workspace = true }
+http = "1"
+http-body = "1"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tower = "0.5.3"
+tokio-stream = { version = "0.1.19", features = ["net"] }
+futures-util = { version = "0.3.34", default-features = false }
+
+# ADR-0043: mTLS on the cluster transports. `rustls` is invariant 3, and the
+# provider is called `ring` -- the finding from phase 10d still applies.
+# `tokio-rustls` terminates itself, because on the server side `tonic` has no hook
+# for a `ClientCertVerifier` of our own. `x509-parser` and `pem` lie in the tree
+# over rcgen and tg-identity respectively anyway.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pki-types = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+x509-parser = "0.18"
+pem = "3"
+# ADR-0044: our own UID for the counter-check to the socket mode. `rustix`
+# encapsulates `getuid` without `unsafe` (invariant 2).
+rustix = { version = "1", features = ["process"] }
+# For our own dialler on the Raft port: terminating TLS ourselves also means
+# connecting ourselves. `hyper-util` lies in the tree over tonic anyway.
+hyper-util = { version = "0.1", features = ["tokio"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# The gatekeeper is checked with a bare `http::Extensions`.
+http = "1"
+# What already stands in [dependencies] does not stand here once more: tests see
+# the regular dependencies. Here only what the tests need **alone**.
+#
+# The attestation test verifies real chains -- the same verifier the data plane
+# uses (ADR-0007).
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["ring", "alloc"] }
+serde_json = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

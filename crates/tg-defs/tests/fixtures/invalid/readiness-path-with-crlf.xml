@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A line break in the probe path (ProbePath, ADR-0102).
+
+  The sharper case of its neighbour: a space splits the request line, a `\r\n`
+  **ends it**. Everything following is then a header of its own —
+  `GET /a\r\nX-Anything: yes HTTP/1.1` sends a header nobody declared, and with
+  two breaks a whole second request.
+
+  If the path came from a container, that would be a trust boundary; it comes
+  from an operator, and it nevertheless belongs refused: the pattern permits
+  exclusively the characters that make up a URI, instead of enumerating what is
+  forbidden (the error ADR-0046 named).
+-->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1.0"/>
+    <readiness port="8080" path="/a&#13;&#10;X-Anything: yes"/>
+  </workload>
+</workloads>

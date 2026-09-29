@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- replicas="0" violates xs:minInclusive=1: zero instances are no workload. -->
+<workloads xmlns="urn:tardigrade:workload:v1">
+  <workload name="api" kind="service">
+    <image reference="registry.example.com/api:1"/>
+    <placement replicas="0"/>
+  </workload>
+</workloads>

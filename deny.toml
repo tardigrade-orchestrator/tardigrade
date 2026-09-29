@@ -1,0 +1,80 @@
+# cargo-deny -- the supply chain policy (ADR-0023, Definition of Done in CLAUDE.md).
+#
+# Four axes: RUSTSEC advisories, the licence allowlist, forbidden crates, permitted
+# sources.
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "all"
+# Exceptions need a comment with a rationale and an expiry date.
+ignore = []
+
+[licenses]
+# Permissive licences plus MPL-2.0 (file-level copyleft, uncritical for linking). No
+# GPL/AGPL: would infect the orchestrator itself.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+exceptions = []
+# As long as the workspace has hardly any dependencies, permitted licences stay
+# unused. Without this a corresponding number of warnings rush through every run.
+unused-allowed-license = "allow"
+
+# The workspace crates themselves carry (as yet) no licence -- see the open point at
+# the end of phase 0. `publish = false` keeps them out of the check.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The wildcard ban aims at registry dependencies without a version bound (ADR-0023:
+# pinning). Workspace-internal path dependencies naturally have no version and are no
+# supply chain risk; the option exempts exclusively path deps of private crates
+# (publish = false).
+allow-wildcard-paths = true
+# Invariant 3 from CLAUDE.md: TLS is rustls. OpenSSL/native-tls must not slip in over
+# a transitive dependency -- stopped hard here.
+deny = [
+    { crate = "openssl", reason = "CLAUDE.md invariant 3: TLS = rustls, no OpenSSL" },
+    { crate = "openssl-sys", reason = "CLAUDE.md invariant 3: TLS = rustls, no OpenSSL" },
+    { crate = "native-tls", reason = "CLAUDE.md invariant 3: TLS = rustls, no native-tls" },
+    # Invariant 1: no eBPF. The proof in `tg_syscall::bpf` counts what is
+    # **loaded** -- it says nothing about what lies in the tree. Pulling in an eBPF
+    # crate is per CLAUDE.md a reason to stop and name it in the PR; here it stops by
+    # itself.
+    { crate = "aya", reason = "CLAUDE.md invariant 1: no eBPF" },
+    { crate = "aya-obj", reason = "CLAUDE.md invariant 1: no eBPF" },
+    { crate = "libbpf-rs", reason = "CLAUDE.md invariant 1: no eBPF" },
+    { crate = "libbpf-sys", reason = "CLAUDE.md invariant 1: no eBPF" },
+    { crate = "redbpf", reason = "CLAUDE.md invariant 1: no eBPF" },
+    { crate = "bcc", reason = "CLAUDE.md invariant 1: no eBPF" },
+    # And no Kubernetes -- the same invariant, the same reason (opacity/audit,
+    # concentration risk, the control plane in the critical path).
+    { crate = "k8s-openapi", reason = "CLAUDE.md invariant 1: no Kubernetes" },
+    { crate = "kube", reason = "CLAUDE.md invariant 1: no Kubernetes" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

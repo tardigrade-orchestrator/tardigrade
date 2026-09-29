@@ -1,0 +1,22 @@
+[package]
+name = "tg-defs"
+description = "Definition types generated from XSD."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The runtime side of the codegen (ADR-0008). xsd-parser itself is NOT included --
+# the generator lives in xtask, here only what the generated code needs lands.
+[dependencies]
+xsd-parser-types = { version = "0.2.1", features = ["quick-xml"] }
+quick-xml = "0.41"
+regex = "1.11"
+
+[dev-dependencies]
+tempfile = "3"

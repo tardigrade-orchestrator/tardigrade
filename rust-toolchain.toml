@@ -1,0 +1,9 @@
+# ADR-0002: MSRV = current stable, a documented N-2 policy.
+# ADR-0023: a pinned toolchain as a precondition of reproducible builds.
+#
+# When raising it: pull `rust-version` in Cargo.toml and `msrv` in clippy.toml along,
+# otherwise the three settings diverge.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

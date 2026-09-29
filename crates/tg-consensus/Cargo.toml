@@ -1,0 +1,62 @@
+[package]
+name = "tg-consensus"
+description = "openraft: the state machine, the storage and network traits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# ADR-0032 fixes the three implementation questions: openraft 0.9.25 (no alpha), the
+# Raft log on redb (no home-made storage layer), our own bus for the DST (phase 5b, not
+# yet here).
+[dependencies]
+# The shared JSON codec of the internal paths (PLAN: "a small, shared crate is
+# missing here"). It lies **beneath** this crate.
+tg-wire = { path = "../tg-wire" }
+# ADR-0039: check the announced X25519 key before it goes into the log. Lies in the
+# tree anyway over `oci-client` -- costs no crate.
+base64 = "0.22"
+tg-defs = { path = "../tg-defs" }
+# The domain rules of the placement (ADR-0011) belong in the domain model, not in the
+# log. The log only carries them.
+tg-model = { path = "../tg-model" }
+# ADR-0095: a secret's sealed value (`Sealed`). The log **never** carries a plaintext
+# (ADR-0020), so it carries this type. **Zero new packages**: `tg-identity` lies in the
+# tree anyway over `tgd`.
+tg-identity = { path = "../tg-identity" }
+# ADR-0012/0040: the cluster CIDR is checked before it goes into the log -- the log is
+# retained (ADR-0020). `ipnet` lies in the tree anyway over `tg-net`.
+ipnet = "2"
+tg-telemetry = { path = "../tg-telemetry" }
+# ADR-0133: one span per applied entry -- the beginning of the chain neither the log
+# nor the audit trail delivers. `tracing` lies in the tree over tg-telemetry.
+tracing = "0.1"
+openraft = { workspace = true }
+redb = { workspace = true }
+serde = { workspace = true }
+# ADR-0037: the join token's hash. Lies in the tree anyway over frost/rcgen.
+metrics = "0.24"
+# ADR-0037: the join token's entropy. `OsRng` is the only source that comes into
+# question for it.
+serde_json = { workspace = true }
+# openraft brings tokio along anyway; what is needed here is only `io-util` for the
+# AsyncRead/Write/Seek impls on `Cursor<Vec<u8>>` that `SnapshotData` demands.
+tokio = { workspace = true, features = ["io-util"] }
+# The real network from phase 5c. The DST's bus (5b) stays untouched by it -- it sits
+# on the same trait layer, only without a wire.
+tonic = { workspace = true }
+bytes = { workspace = true }
+http = "1"
+http-body = "1"
+
+[dev-dependencies]
+# ADR-0103: the witness needs a **real** SPKI. `rcgen` lies in the tree anyway over
+# `tg-identity` -- an edge, no package.
+rcgen = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }

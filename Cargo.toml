@@ -1,0 +1,167 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask", "tests/dst"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+authors = ["Dana Schlifka <dana.schlifka@logicalis.de>"]
+# ADR-0139. The text lies as `LICENSE` in the root; the bill of materials reads
+# exactly this field (ADR-0134) and named our own crates `NOASSERTION` until here.
+license = "Apache-2.0"
+publish = false
+
+# Invariant 2 from CLAUDE.md: `unsafe` is forbidden workspace-wide. `forbid` at the
+# cargo level cannot be softened by a crate-local `allow`. The only exception:
+# `tg-syscall` deliberately does not inherit this table (ADR-0002).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+# ADR-0001 makes the ADRs the truth, and the doc blocks are the way there: a link
+# that points into the void renders as **nothing** and is thereby evidence nobody can
+# follow. Measured, 34 such links lay in the tree, among them three with substance (an
+# `# Errors` line with a variant that does not exist; a mechanism ADR-0081 removed; a
+# module path that is not right).
+#
+# The lints fire only at `cargo doc` -- `cargo build` and `cargo clippy` do not see
+# them. That is run in `cargo xtask ci`; the Definition of Done in `CLAUDE.md` does not
+# cover it, and that is the same known gap as at `codegen --check`.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_html_tags = "deny"
+redundant_explicit_links = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# `tg-syscall`'s head has said since phase 0 that every `unsafe` block carries a
+# `// SAFETY:` comment -- and nobody checked it. Measured, all four carry it, one of
+# them with twelve lines of rationale; what was missing is the witness. The compiler is
+# the better one here: it sees the block and not a text window around it (my first
+# hand-rolled run with three lines reported all four as undocumented -- an instrument
+# that measures too narrowly produces a finding that does not exist).
+#
+# The lint lies in the `restriction` group, which expressly does not run along here (it
+# would need exceptions in a number at which a guard gets switched off instead of
+# read). It therefore stands on its own, like `unwrap_used` and `expect_used`.
+#
+# Workspace-wide and not only in `tg-syscall`: there it is without effect today (every
+# other crate forbids `unsafe` entirely), and exactly for that reason it covers the
+# next crate that gets an exception too.
+undocumented_unsafe_blocks = "deny"
+
+# From phase 1 on the jointly pinned versions grow here (ADR-0023: exact versions for
+# the consensus, crypto and runtime crates).
+[workspace.dependencies]
+# ADR-0032: 0.9.25, not the 0.10 alpha. Pinned exactly, because that is the consensus
+# core -- nothing shall move here without the DST suite from phase 5b running over
+# it.
+openraft = { version = "=0.9.25", features = ["serde", "storage-v2"] }
+# ADR-0032: the Raft log is durable and a tamper-evident audit substrate (ADR-0020). A
+# proven engine instead of segment files of our own.
+redb = "=4.2.0"
+serde = { version = "1", features = ["derive"] }
+# ADR-0002 sets tonic for gRPC. Pinned exactly like openraft and redb: the transport
+# belongs to the consensus core (ADR-0023, the pinning of critical crates). `channel`
+# is no longer the default in 0.14 and is needed for the client side.
+tonic = { version = "=0.14.6", features = ["channel"] }
+# Only for the codec's buffer traits. Lies beneath tonic and hyper anyway.
+bytes = "1"
+# ADR-0006/0014: building X.509 SVIDs. Without the default features it would be three
+# crates (pki-types, time, yasna); `crypto` brings `ring` along, which lies in the tree
+# anyway over rustls -- and expressly no OpenSSL (invariant 3). `x509-parser` came along
+# with the wiring: as soon as the CA certificate comes from outside (ADR-0014 -- signed
+# by the air-gapped root, read from the disk at the agent), it has to be parsed. mint.rs
+# predicted this moment and left the dependency out until then.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
+# ADR-0014: the signing CA is a FROST threshold group. Pinned exactly like openraft
+# and redb -- ADR-0014 says it expressly for the crypto core: "no alpha in the crypto
+# core". 3.0.0 is stable; the two findings from sub-decision 3 (the threshold is not
+# lowerable, a refresh only removes) hold there unchanged, the names in the `repairable`
+# module have changed.
+frost-ed25519 = "=3.0.0"
+# The randomness for the nonces. `getrandom` gives `OsRng` -- the only source that
+# comes into question in operation (ADR-0014: a repeated nonce gives the share away).
+# Version 0.6, because `frost` lies on it.
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
+time = { version = "0.3", default-features = false }
+serde_json = "1"
+tokio = { version = "1", default-features = false }
+
+# ADR-0026: a bridge, no fork. xsd-parser-types 0.2.1 pins quick-xml 0.38 and thereby
+# drags RUSTSEC-2026-0194 and -0195 into the ingest path; the fix lies in quick-xml
+# 0.41. The patch is one line, see third-party/xsd-parser-types/PATCH.md. Falls away as
+# soon as upstream pulls along.
+[patch.crates-io]
+xsd-parser-types = { path = "third-party/xsd-parser-types" }
+xsd-parser = { path = "third-party/xsd-parser" }
+
+[profile.dev]
+opt-level = 0
+codegen-units = 32
+
+# Measured on 2026-09-08: a test binary of this tree carries **224 MB** with full
+# debug info, **60 MB** with line tables -- and 582 artifacts lie above 100 MB, together
+# 131 G. That is the cause of eleven disk incidents in this work, and every one of them
+# appeared as a tool error (`linking with cc failed`, `Bus error`).
+#
+# **ADR-0082 is untouched.** Its statement is that the tests must *promise* the same as
+# the delivered binary, and its three determinations concern **behaviour**:
+# `panic = "unwind"`, `overflow-checks = true` and the compiler guard on them. Debug
+# info changes no behaviour -- substantiated at the two properties on which something
+# hangs here:
+#
+#   * A panic still names file and line (`panicked at
+#     crates/tgctl/tests/handbook.rs:1681:69`). It comes from `panic::Location`, that
+#     is, from compiler metadata and not from DWARF -- and on that hangs the test rig's
+#     panic hook.
+#   * A backtrace still names file and line (`at ./pt.rs:1:54`); line tables are
+#     exactly what it needs.
+#
+# What is gone is variable inspection in a debugger. Measured, this tree mentions none
+# (`gdb`/`lldb` occur only in ADR-0090, and there it is about `ptrace` *in the
+# container*), and nobody reads `RUST_BACKTRACE`.
+debug = "line-tables-only"
+
+# The curve arithmetic under FROST (ADR-0014) is about a hundred times slower without
+# optimization than with. That does not stand out at the signing but in the fuzz run
+# against the nonce discipline: 20 000 iterations thereby cost a minute and a half
+# instead of half a second -- and a gate that takes too long gets turned down. What is
+# optimized is therefore exactly what is computed; our own code stays unoptimized and
+# debuggable.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.frost-core]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+# The release profile must promise the same as the tests (ADR-0082). The two lower
+# lines are the whole difference and no question of speed:
+#
+# - `panic = "unwind"`: a panic costs its task, not the node. With `abort` -- the
+#   default from the scaffolding of phase 0 -- a panic in one of the four sidecar
+#   shards takes the other three along with it, together with every running mTLS
+#   connection (ADR-0019, ADR-0022, ADR-0062). The setting is not settable per package;
+#   the fallback to `abort` fails at compile time in `tg-syscall`.
+# - `overflow-checks = true`: what the tests treat as an error the delivered binary
+#   treats as an error too. Without the line `1000u64 - 2000u64` yields, as delivered,
+#   18446744073709550616 -- a free capacity of 18 exabytes where a deficit stands
+#   (ADR-0069).
+#
+# Measured, both together cost +12.4 % of binary size.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
+overflow-checks = true

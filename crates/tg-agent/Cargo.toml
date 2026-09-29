@@ -1,0 +1,86 @@
+[package]
+name = "tg-agent"
+description = "Node-agent binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# ADR-0015: the messages go to the subscriber, not to stderr. The exceptions
+# stand before the subscriber and are noted at the place.
+tracing = "0.1"
+# ADR-0012/0013/0039: bridge, address assignment and the node-local resolver.
+tg-net = { path = "../tg-net" }
+# ADR-0043: the lock on the data directory.
+tg-syscall = { path = "../tg-syscall" }
+# ADR-0039: the underlay's routes are networks. `ipnet` lies in the tree over
+# `tg-net` anyway.
+ipnet = "2"
+tokio-stream = "0.1"
+futures-util = { version = "0.3", default-features = false }
+serde_json = { workspace = true }
+tg-defs = { path = "../tg-defs" }
+tg-model = { path = "../tg-model" }
+tg-store = { path = "../tg-store" }
+tg-runtime = { path = "../tg-runtime" }
+tg-telemetry = { path = "../tg-telemetry" }
+# Since ADR-0145 the agent sets a metric of its own (the assigned devices). The
+# others arise in `tg-runtime`, which already carries `metrics`; here the
+# inventory comes from `devices.rs` and thereby from this crate.
+#
+# **No new component** in the bill of materials -- measured 359 before as after,
+# for it lies in the delivery closure over `tg-telemetry` anyway. But a new
+# **edge** (`tg-agent -> metrics`), and that stands there: the bill of materials
+# carries the real graph and not merely a list (ADR-0134).
+metrics = "0.24"
+# The wiring from phase 8: the agent mints locally (ADR-0006/0019) and serves the
+# workload API socket (ADR-0035). Until then tg-identity was connected to no
+# binary.
+tg-identity = { path = "../tg-identity" }
+pem = "3"
+# ADR-0037: the node key arises here and stays here.
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+
+# ADR-0043: the credential on the node session. `rustls` is invariant 3, the
+# provider is called `ring` (finding from 10d). TLS is terminated by ourselves,
+# because `tonic`'s own way does not carry the SPIFFE check.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pki-types = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tower = { version = "0.5", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tonic = { workspace = true }
+http = "1"
+
+[dev-dependencies]
+# Reads the metric out in the test instead of starting the Prometheus endpoint
+# (ADR-0145) -- the same rationale and the same version as in `tg-proxy` and
+# `tg-identity`.
+metrics-util = { version = "0.20", features = ["debugging"] }
+# For the witnesses of the **files** the agent writes and the sidecar reads: the
+# egress line (ADR-0092) and the active-role line (ADR-0066). Because the sidecar
+# does not hang on `tg-model` (the edge would pull an XSD parser into the data
+# plane), the **format** is the contract and not a shared type -- and a contract
+# holds only when a run sees both sides. A rebuilt reader in the witness is then
+# no evidence but a second interpretation: measured, one of them was a different
+# one in both directions.
+tg-proxy = { path = "../tg-proxy" }
+tempfile = "3"
+# Catches the message of the secret delivery in the test (ADR-0016, ADR-0098).
+# Lies in the tree over `tg-telemetry` anyway; a `Subscriber` of our own would be
+# a second reader for a format with one writer.
+tracing-subscriber = "0.3"
+# The join test runs a real control plane and verifies the issued chain
+# (ADR-0006/0037).
+tgd = { path = "../tgd" }
+tg-consensus = { path = "../tg-consensus" }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["ring", "alloc"] }
+rustls-pki-types = "1"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }

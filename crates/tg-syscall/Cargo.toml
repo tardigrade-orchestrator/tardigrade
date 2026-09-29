@@ -1,0 +1,39 @@
+[package]
+name = "tg-syscall"
+description = "Thin syscall wrappers: netlink, cgroups, namespaces. The only unsafe place."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No `[lints] workspace = true`: this crate is the documented exception to invariant 2
+# (CLAUDE.md). The other lints stay identical; in addition
+# `undocumented_unsafe_blocks` enforces a SAFETY comment per unsafe block.
+[lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+# ADR-0002: rustix preferred. rustix already wraps the syscalls safely, so this crate
+# gets by without `unsafe` of its own for the time being -- the exception stays in
+# place but is not used in advance.
+[dependencies]
+rustix = { version = "1", features = ["mount", "fs", "process", "thread", "system"] }
+# Only for the bpf(2) call in `bpf.rs` -- the only syscall `rustix` does not wrap, and
+# thereby the only place with `unsafe` of its own.
+libc = "0.2"
+
+[dev-dependencies]
+# The guard over the native libraries reads `cargo metadata` (ADR-0038). **With a
+# library and not by hand**: the first throw took the target name instead of the
+# package name (`build-script-build`) -- exactly the error this tree has already paid
+# for once at the image config. `serde_json` lies in the tree anyway; it is an edge, no
+# crate.
+serde_json = { workspace = true }
