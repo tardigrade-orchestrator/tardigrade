@@ -57,7 +57,7 @@ manual.
 ## Limitations
 Requires Kernel 6.5+
 
-Cluster Size shall not exceed 50 nodes. This is a design choice, This is a design choice, as increasing the node count quadratically increases the amount of WireGuard connections ($O(n^2)$).
+Cluster Size shall not exceed 50 nodes. This is a design choice, as increasing the node count quadratically increases the amount of WireGuard connections ($O(n^2)$).
 
 No HPA (Horizontal Pod Autoscaler)
 
