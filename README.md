@@ -7,26 +7,36 @@ REMIT/DORA-regulated environments with a target workload availability of 4-9 to
 Three binaries — `tgd` (control plane), `tg-agent` (per node), `tgctl` (CLI) —
 plus `tg-proxy`, the data plane's sidecar.
 
-## What defines it
+### Advanced Container Dependency Mechanics (Graph-Based)
+* **Orthogonal Dependency Axes:** Explicitly decouples execution ordering (`After`/`Before`) from functional requirements (`Requires`, `Wants`, `BindsTo`, `Conflicts`). This structural separation avoids the classic pitfalls and ambiguities found in standard systemd or compose-style setups.
+* **True Graph Modeling:** Dependencies are modeled natively as graph edges rather than loose foreign-key fields. Cycles, self-references, or unreadable configurations are caught early at ingest and isolated before they can compromise the cluster state machine.
+* **Damped Runtime Evaluation:** Edges are evaluated dynamically on a per-pass condition basis rather than being driven by brittle, cascade-triggering state change events. A deferred or just-restarted target explicitly avoids dragging down its dependents.
+* **Inherent Sidecar Coupling:** The security-critical mTLS data-plane sidecar is bound natively to its application workload using a strict `BindsTo` and `After` edge graph. If the container's cryptographic identity fails or expires, the workload's routing is securely halted.
 
-- **Static stability** (ADR-0019, the keystone): workload availability is
-  decoupled from the control plane. A quorum loss stops no running container.
-- **Zero trust without eBPF:** SPIFFE identity per container, mTLS in the
-  sidecar, container networking via veth, nftables and WireGuard in userspace
-  (ADR-0006, ADR-0007, ADR-0012).
-- **Tamper-evident audit trail:** the Raft log is the WORM substrate, and the
-  archive arises in the apply path, before a compaction can strike (ADR-0020).
-- **Pure Rust:** no Go, no Kubernetes. `#![forbid(unsafe_code)]` in every crate
-  except `tg-syscall`, the thin syscall edge.
+### Architecture, Performance & Determinism
+* **Pure Rust Architecture:** Eliminating Go and standard Kubernetes components removes runtime Garbage Collection (GC) jitter. This choice guarantees deterministic tail-latency profiles across critical data paths.
+* **Static Stability Principle:** Workload Availability Service Level Objectives (SLOs) are completely decoupled from the status of the control plane. A control plane failure or quorum loss does not disrupt actively running containers.
+* **In-Process State Projection:** The architecture drops heavyweight external database dependencies (such as SurrealDB) in favor of a lean, throwaway in-process memory graph projection, dramatically streamlining state lookups.
+
+### Zero-Trust Security & Cryptographic Infrastructure
+* **Native SPIFFE Server Architecture:** Every container automatically receives a cryptographic identity (X.509 SVID) minted via a localized subsystem built directly into the agent. This removes external SPIRE-style dependencies while keeping the runtime hot path free from central network lookups.
+* **Pure Userspace mTLS Data Plane:** Mutual TLS identity checks are handled natively by a customized, transparent sidecar (`rustls`). This provides robust microsegmentation and policy enforcement while explicitly avoiding brittle kernel-level eBPF complexity.
+* **Distributed Cryptography (FROST & TPM):** The orchestrator implements Threshold signing (FROST) with distributed key generation (DKG). The Root CA remains securely air-gapped, while live signing shares are physically sealed on-node via TPM.
+* **Fully Meshed Wireguard Cluster Underlay** Cluster has a fully encrypted wireguard mesh underneath to protect all traffic inside the cluster, independently from from container zero trust
+* **luks2 encrypted container images:** writeable container images are encrypted with linux native luks2, keys bound to TPM
+
+### Fault Tolerance, Compliance & Operations
+* **Fail-Soft Isolation Architecture:** A broken or unreadable configuration file only cost-isolates its specific workload. Node agents handle bad definitions gracefully instead of cascading into unrecoverable crash loops that dismantle core network sockets and local resolvers.
+* **Tamper-Evident Audit Trails (DORA/REMIT):** Tailored specifically for highly regulated financial/operational compliance environments, the distributed Raft consensus log serves natively as a rigid, tamper-evident WORM substrate before any database compaction takes place.
+* **Self Fencing writer instances** singlewriter instances use self fencing to avoid splitbrain situations and maintain data consistency
+* **OpenTelemetry Support** full open telemetry support for all components for usage with Grafana, Prometheus e.g.
 
 ## Where to find what
 
 | What | Where |
 |---|---|
-| This project's constitution | `CLAUDE.md` |
 | The architecture decisions | `plans/`, index in `plans/README.md` |
-| The build plan with the phases | `plans/PLAN.md` |
-| The build journal | `plans/journal/2026-build.md` |
+| command reference | `docs/COMMANDs.md` |
 | The operations manual | `docs/OPERATIONS.md` |
 | The bill of materials of the delivery | `docs/sbom.cdx.json` |
 
