@@ -40,8 +40,6 @@ plus `tg-proxy`, the data plane's sidecar.
 | The operations manual | `docs/OPERATIONS.md` |
 | The bill of materials of the delivery | `docs/sbom.cdx.json` |
 
-The ADRs are the truth: an accepted decision is changed with a new ADR, not by
-silent code drift.
 
 ## Building
 
