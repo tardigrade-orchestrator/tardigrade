@@ -1,8 +1,7 @@
 # Tardigrade
 
 A container orchestrator for Linux, in Rust, without foreign daemons — built for
-REMIT/DORA-regulated environments with a target workload availability of 4-9 to
-5-9.
+regulated environments aiming at resilience, static stability, auditability and security.
 
 Three binaries — `tgd` (control plane), `tg-agent` (per node), `tgctl` (CLI) —
 plus `tg-proxy`, the data plane's sidecar.
