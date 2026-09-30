@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "tests/dst"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-authors = ["Dana Schlifka <dana.schlifka@logicalis.de>"]
+authors = ["Dana Schlifka <djs@techturn.de>"]
 # ADR-0139. The text lies as `LICENSE` in the root; the bill of materials reads
 # exactly this field (ADR-0134) and named our own crates `NOASSERTION` until here.
 license = "Apache-2.0"
