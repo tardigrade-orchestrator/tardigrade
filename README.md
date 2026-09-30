@@ -16,7 +16,7 @@ plus `tg-proxy`, the data plane's sidecar.
 ### Architecture, Performance & Determinism
 * **Pure Rust Architecture:** Eliminating Go and standard Kubernetes components removes runtime Garbage Collection (GC) jitter. This choice guarantees deterministic tail-latency profiles across critical data paths.
 * **Static Stability Principle:** Workload Availability Service Level Objectives (SLOs) are completely decoupled from the status of the control plane. A control plane failure or quorum loss does not disrupt actively running containers.
-* **In-Process State Projection:** The architecture drops heavyweight external database dependencies (such as SurrealDB) in favor of a lean, throwaway in-process memory graph projection, dramatically streamlining state lookups.
+* **In-Process State Projection:** The architecture drops heavyweight external database dependencies in favor of a lean, throwaway in-process memory graph projection, streamlining state lookups.
 
 ### Zero-Trust Security & Cryptographic Infrastructure
 * **Native SPIFFE Server Architecture:** Every container automatically receives a cryptographic identity (X.509 SVID) minted via a localized subsystem built directly into the agent. This removes external SPIRE-style dependencies while keeping the runtime hot path free from central network lookups.
